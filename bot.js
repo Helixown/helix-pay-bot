@@ -24,9 +24,9 @@ function isAllowed(chatId) { return operadores.has(chatId); }
 
 // ── Pending payments (in-memory) ─────────────────────────────────────────────
 const pendingPayments = new Map();
-function savePending(amount, description, targetChatId) {
+function savePending(amount, description, targetChatId, operatorChatId) {
     const id = crypto.randomBytes(4).toString('hex');
-    pendingPayments.set(id, { amount, description, targetChatId });
+    pendingPayments.set(id, { amount, description, targetChatId, operatorChatId });
     setTimeout(() => pendingPayments.delete(id), 30 * 60 * 1000); // expira en 30 min
     return id;
 }
@@ -96,30 +96,31 @@ ${methodLabel}
 bot.onText(/\/addoperador(?:\s+(\d+))?/, (msg, match) => {
     if (msg.chat.id !== ADMIN_CHAT_ID) return;
     const id = parseInt(match[1]);
-    if (!id) return bot.sendMessage(ADMIN_CHAT_ID, '❌ Uso: /addoperador <chatId>');
+    if (!id) return bot.sendMessage(msg.chat.id, '❌ Uso: /addoperador <chatId>');
     operadores.add(id);
-    bot.sendMessage(ADMIN_CHAT_ID, `✅ Operador <code>${id}</code> agregado.`, { parse_mode: 'HTML' });
+    bot.sendMessage(msg.chat.id, `✅ Operador <code>${id}</code> agregado.`, { parse_mode: 'HTML' });
 });
 
 bot.onText(/\/removeoperador(?:\s+(\d+))?/, (msg, match) => {
     if (msg.chat.id !== ADMIN_CHAT_ID) return;
     const id = parseInt(match[1]);
-    if (!id) return bot.sendMessage(ADMIN_CHAT_ID, '❌ Uso: /removeoperador <chatId>');
-    if (id === ADMIN_CHAT_ID) return bot.sendMessage(ADMIN_CHAT_ID, '❌ No puedes removerte a ti mismo.');
+    if (!id) return bot.sendMessage(msg.chat.id, '❌ Uso: /removeoperador <chatId>');
+    if (id === ADMIN_CHAT_ID) return bot.sendMessage(msg.chat.id, '❌ No puedes removerte a ti mismo.');
     operadores.delete(id);
-    bot.sendMessage(ADMIN_CHAT_ID, `✅ Operador <code>${id}</code> removido.`, { parse_mode: 'HTML' });
+    bot.sendMessage(msg.chat.id, `✅ Operador <code>${id}</code> removido.`, { parse_mode: 'HTML' });
 });
 
 bot.onText(/\/operadores/, (msg) => {
     if (msg.chat.id !== ADMIN_CHAT_ID) return;
     const lista = [...operadores].map(id => `• <code>${id}</code>${id === ADMIN_CHAT_ID ? ' (admin)' : ''}`).join('\n');
-    bot.sendMessage(ADMIN_CHAT_ID, `👥 <b>Operadores activos:</b>\n${lista}`, { parse_mode: 'HTML' });
+    bot.sendMessage(msg.chat.id, `👥 <b>Operadores activos:</b>\n${lista}`, { parse_mode: 'HTML' });
 });
 
 bot.onText(/\/start/, (msg) => {
     if (!isAllowed(msg.chat.id)) return;
     const hasStripe = !!stripe;
-    bot.sendMessage(ADMIN_CHAT_ID,
+    const isAdmin = msg.chat.id === ADMIN_CHAT_ID;
+    bot.sendMessage(msg.chat.id,
 `💳 <b>Pay Bot</b>
 ━━━━━━━━━━━━━━
 <b>Métodos activos:</b>
@@ -127,11 +128,11 @@ ${hasStripe ? '✅' : '❌'} Stripe (tarjeta)
 
 <b>Cobros:</b>
 /cobrar <code>&lt;monto&gt; [descripción] [chatId]</code>
-
+${isAdmin ? `
 <b>Operadores:</b>
 /addoperador <code>&lt;chatId&gt;</code>
 /removeoperador <code>&lt;chatId&gt;</code>
-/operadores
+/operadores` : ''}
 
 <b>Ejemplos:</b>
 <code>/cobrar 50</code>
@@ -142,13 +143,14 @@ ${hasStripe ? '✅' : '❌'} Stripe (tarjeta)
 });
 
 bot.onText(/\/cobrar(?:\s+(.+))?/, async (msg, match) => {
-    if (!isAllowed(msg.chat.id)) return;
+    const chatId = msg.chat.id;
+    if (!isAllowed(chatId)) return;
 
     const args = (match[1] || '').trim().split(/\s+/);
     const amount = args[0];
 
     if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
-        return bot.sendMessage(ADMIN_CHAT_ID, '❌ Uso: /cobrar <monto> [descripción] [chatId]\nEjemplo: /cobrar 50 10 cuentas');
+        return bot.sendMessage(chatId, '❌ Uso: /cobrar <monto> [descripción] [chatId]\nEjemplo: /cobrar 50 10 cuentas');
     }
 
     let targetChatId = null;
@@ -159,13 +161,13 @@ bot.onText(/\/cobrar(?:\s+(.+))?/, async (msg, match) => {
         descParts = descParts.slice(0, -1);
     }
     const description = descParts.join(' ') || 'Pedido personalizado';
-    const pendingId   = savePending(amount, description, targetChatId);
+    const pendingId   = savePending(amount, description, targetChatId, chatId);
 
     const buttons = [];
     if (stripe) buttons.push({ text: '💳 Tarjeta (Stripe)', callback_data: `pay_s_${pendingId}` });
     buttons.push({ text: '🏦 PayPal (Paddle)', callback_data: `pay_p_${pendingId}` });
 
-    await bot.sendMessage(ADMIN_CHAT_ID,
+    await bot.sendMessage(chatId,
 `💰 <b>$${parseFloat(amount).toFixed(2)} USD</b> — ${description}
 Selecciona método de pago:`,
         { parse_mode: 'HTML', reply_markup: { inline_keyboard: [buttons] } }
@@ -184,13 +186,14 @@ bot.on('callback_query', async (cq) => {
 
         if (!pending) {
             bot.answerCallbackQuery(cq.id, { text: '❌ Solicitud expirada. Usa /cobrar de nuevo.' });
-            return bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: ADMIN_CHAT_ID, message_id: cq.message.message_id }).catch(() => {});
+            return bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: cq.message.chat.id, message_id: cq.message.message_id }).catch(() => {});
         }
 
         bot.answerCallbackQuery(cq.id, { text: '⏳ Generando link...' });
-        await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: ADMIN_CHAT_ID, message_id: cq.message.message_id }).catch(() => {});
+        await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: cq.message.chat.id, message_id: cq.message.message_id }).catch(() => {});
 
-        const { amount, description, targetChatId } = pending;
+        const { amount, description, targetChatId, operatorChatId } = pending;
+        const replyChatId = operatorChatId || ADMIN_CHAT_ID;
 
         try {
             let url, txId;
@@ -205,7 +208,7 @@ bot.on('callback_query', async (cq) => {
             }
 
             const methodLabel = method === 'stripe' ? '💳 Stripe' : '🏦 Paddle';
-            await bot.sendMessage(ADMIN_CHAT_ID,
+            await bot.sendMessage(replyChatId,
 `✅ <b>Link generado (${methodLabel})</b>
 ━━━━━━━━━━━━━━
 💰 <b>Monto:</b> $${parseFloat(amount).toFixed(2)} USD
@@ -216,7 +219,16 @@ bot.on('callback_query', async (cq) => {
                 { parse_mode: 'HTML', disable_web_page_preview: true }
             );
 
-            if (targetChatId && targetChatId !== ADMIN_CHAT_ID) {
+            if (replyChatId !== ADMIN_CHAT_ID) {
+                await bot.sendMessage(ADMIN_CHAT_ID,
+`📋 <b>Cobro generado por operador</b>
+💰 $${parseFloat(amount).toFixed(2)} USD — ${description}
+🔖 <code>${txId}</code>`,
+                    { parse_mode: 'HTML' }
+                ).catch(() => {});
+            }
+
+            if (targetChatId && targetChatId !== replyChatId) {
                 await bot.sendMessage(targetChatId,
 `💳 <b>Link de pago</b>
 ━━━━━━━━━━━━━━
@@ -225,11 +237,11 @@ bot.on('callback_query', async (cq) => {
 
 🔗 ${url}`,
                     { parse_mode: 'HTML', disable_web_page_preview: true }
-                ).catch(() => bot.sendMessage(ADMIN_CHAT_ID, `⚠️ No se pudo enviar al cliente (${targetChatId}). Reenvía tú el link.`));
+                ).catch(() => bot.sendMessage(replyChatId, `⚠️ No se pudo enviar al cliente (${targetChatId}). Reenvía tú el link.`));
             }
         } catch (err) {
             const detail = err.response?.data?.error?.detail || err.message;
-            await bot.sendMessage(ADMIN_CHAT_ID, `❌ Error: ${detail}`);
+            await bot.sendMessage(replyChatId, `❌ Error: ${detail}`);
         }
     }
 });
