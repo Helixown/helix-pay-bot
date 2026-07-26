@@ -18,6 +18,10 @@ const bot    = new TelegramBot(BOT_TOKEN, { polling: true });
 const app    = express();
 const stripe = STRIPE_SECRET_KEY ? Stripe(STRIPE_SECRET_KEY) : null;
 
+// ── Operadores ────────────────────────────────────────────────────────────────
+const operadores = new Set([ADMIN_CHAT_ID]);
+function isAllowed(chatId) { return operadores.has(chatId); }
+
 // ── Pending payments (in-memory) ─────────────────────────────────────────────
 const pendingPayments = new Map();
 function savePending(amount, description, targetChatId) {
@@ -89,18 +93,45 @@ ${methodLabel}
 }
 
 // ── Comandos ──────────────────────────────────────────────────────────────────
-bot.onText(/\/start/, (msg) => {
+bot.onText(/\/addoperador(?:\s+(\d+))?/, (msg, match) => {
     if (msg.chat.id !== ADMIN_CHAT_ID) return;
+    const id = parseInt(match[1]);
+    if (!id) return bot.sendMessage(ADMIN_CHAT_ID, '❌ Uso: /addoperador <chatId>');
+    operadores.add(id);
+    bot.sendMessage(ADMIN_CHAT_ID, `✅ Operador <code>${id}</code> agregado.`, { parse_mode: 'HTML' });
+});
+
+bot.onText(/\/removeoperador(?:\s+(\d+))?/, (msg, match) => {
+    if (msg.chat.id !== ADMIN_CHAT_ID) return;
+    const id = parseInt(match[1]);
+    if (!id) return bot.sendMessage(ADMIN_CHAT_ID, '❌ Uso: /removeoperador <chatId>');
+    if (id === ADMIN_CHAT_ID) return bot.sendMessage(ADMIN_CHAT_ID, '❌ No puedes removerte a ti mismo.');
+    operadores.delete(id);
+    bot.sendMessage(ADMIN_CHAT_ID, `✅ Operador <code>${id}</code> removido.`, { parse_mode: 'HTML' });
+});
+
+bot.onText(/\/operadores/, (msg) => {
+    if (msg.chat.id !== ADMIN_CHAT_ID) return;
+    const lista = [...operadores].map(id => `• <code>${id}</code>${id === ADMIN_CHAT_ID ? ' (admin)' : ''}`).join('\n');
+    bot.sendMessage(ADMIN_CHAT_ID, `👥 <b>Operadores activos:</b>\n${lista}`, { parse_mode: 'HTML' });
+});
+
+bot.onText(/\/start/, (msg) => {
+    if (!isAllowed(msg.chat.id)) return;
     const hasStripe = !!stripe;
     bot.sendMessage(ADMIN_CHAT_ID,
 `💳 <b>Pay Bot</b>
 ━━━━━━━━━━━━━━
 <b>Métodos activos:</b>
 ${hasStripe ? '✅' : '❌'} Stripe (tarjeta)
-✅ Paddle (PayPal)
 
-<b>Uso:</b>
+<b>Cobros:</b>
 /cobrar <code>&lt;monto&gt; [descripción] [chatId]</code>
+
+<b>Operadores:</b>
+/addoperador <code>&lt;chatId&gt;</code>
+/removeoperador <code>&lt;chatId&gt;</code>
+/operadores
 
 <b>Ejemplos:</b>
 <code>/cobrar 50</code>
@@ -111,7 +142,7 @@ ${hasStripe ? '✅' : '❌'} Stripe (tarjeta)
 });
 
 bot.onText(/\/cobrar(?:\s+(.+))?/, async (msg, match) => {
-    if (msg.chat.id !== ADMIN_CHAT_ID) return;
+    if (!isAllowed(msg.chat.id)) return;
 
     const args = (match[1] || '').trim().split(/\s+/);
     const amount = args[0];
@@ -143,7 +174,7 @@ Selecciona método de pago:`,
 
 // ── Callbacks ─────────────────────────────────────────────────────────────────
 bot.on('callback_query', async (cq) => {
-    if (cq.message.chat.id !== ADMIN_CHAT_ID) return bot.answerCallbackQuery(cq.id);
+    if (!isAllowed(cq.message.chat.id)) return bot.answerCallbackQuery(cq.id);
     const data = cq.data;
 
     if (data.startsWith('pay_s_') || data.startsWith('pay_p_')) {
