@@ -8,6 +8,10 @@ const BOT_TOKEN            = process.env.BOT_TOKEN;
 const ADMIN_CHAT_ID        = parseInt(process.env.ADMIN_CHAT_ID || '8237372777');
 const PADDLE_API_KEY       = process.env.PADDLE_API_KEY;
 const PADDLE_WEBHOOK_SECRET = process.env.PADDLE_WEBHOOK_SECRET || '';
+
+console.log('[DEBUG] BOT_TOKEN present:', !!BOT_TOKEN, '| length:', BOT_TOKEN?.length);
+console.log('[DEBUG] ADMIN_CHAT_ID:', ADMIN_CHAT_ID);
+console.log('[DEBUG] PADDLE_API_KEY present:', !!PADDLE_API_KEY);
 const PORT                 = process.env.PORT || 3000;
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
@@ -53,7 +57,12 @@ async function createCheckoutLink(amount, currency, description) {
 
 // ── Comandos ─────────────────────────────────────────────────────────────────
 
+bot.on('message', (msg) => {
+    console.log('[DEBUG] Message from:', msg.chat.id, '| text:', msg.text);
+});
+
 bot.onText(/\/start/, (msg) => {
+    console.log('[DEBUG] /start from:', msg.chat.id, '| ADMIN_CHAT_ID:', ADMIN_CHAT_ID, '| match:', msg.chat.id === ADMIN_CHAT_ID);
     if (msg.chat.id !== ADMIN_CHAT_ID) return;
     bot.sendMessage(ADMIN_CHAT_ID,
 `💳 <b>Pay Bot</b>
