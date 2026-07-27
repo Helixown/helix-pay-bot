@@ -43,6 +43,25 @@ function loadCatalog() {
 const catalog = loadCatalog();
 function saveCatalog() { fs.writeFileSync(PRODUCTS_FILE, JSON.stringify(catalog, null, 2)); }
 
+// ── Historial de ventas ───────────────────────────────────────────────────────
+const SALES_FILE = process.env.SALES_FILE || path.join(__dirname, 'sales.json');
+function loadSales() {
+    try { return JSON.parse(fs.readFileSync(SALES_FILE, 'utf8')); }
+    catch { return []; }
+}
+const sales = loadSales();
+function recordSale(sale) {
+    sales.push(sale);
+    fs.writeFileSync(SALES_FILE, JSON.stringify(sales, null, 2));
+}
+
+// Descripción de cada checkout generado, para poder registrar la venta cuando llegue el webhook
+const checkoutMeta = new Map();
+function saveCheckoutMeta(txId, description) {
+    checkoutMeta.set(txId, description);
+    setTimeout(() => checkoutMeta.delete(txId), 24 * 60 * 60 * 1000);
+}
+
 // ── Pending payments (in-memory) ─────────────────────────────────────────────
 const pendingPayments = new Map();
 function savePending(amount, description, targetChatId, operatorChatId) {
@@ -279,6 +298,23 @@ bot.onText(/\/tienda/, (msg) => {
     sendTienda(msg.chat.id);
 });
 
+function sendVentas(chatId) {
+    if (!sales.length) return bot.sendMessage(chatId, '📊 Aún no hay ventas registradas.');
+    const total = sales.reduce((sum, s) => sum + s.amount, 0);
+    bot.sendMessage(chatId,
+`📊 <b>Ventas</b>
+━━━━━━━━━━━━━━
+🧾 Vendidas: <b>${sales.length}</b>
+💰 Total generado: <b>$${total.toFixed(2)} USD</b>`,
+        { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🗑️ Reiniciar contador', callback_data: 'reset_ventas_ask' }]] } }
+    );
+}
+
+bot.onText(/\/ventas/, (msg) => {
+    if (!isAllowed(msg.chat.id)) return;
+    sendVentas(msg.chat.id);
+});
+
 bot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
 
@@ -308,6 +344,9 @@ ${hasStripe ? '✅' : '❌'} Stripe (tarjeta)
 /addproducto <code>&lt;precio&gt; &lt;nombre&gt;</code>
 /listproductos
 /delproducto <code>&lt;id&gt;</code>
+
+<b>Ventas:</b>
+/ventas
 ${isAdmin ? `
 <b>Operadores:</b>
 /addoperador <code>&lt;chatId&gt;</code>
@@ -365,6 +404,30 @@ bot.on('callback_query', async (cq) => {
         return sendTienda(chatId);
     }
 
+    if (data === 'reset_ventas_ask') {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        bot.answerCallbackQuery(cq.id);
+        return bot.sendMessage(chatId, '⚠️ ¿Seguro que quieres reiniciar el contador de ventas a 0? Esto no se puede deshacer.', {
+            reply_markup: { inline_keyboard: [[
+                { text: '✅ Sí, reiniciar', callback_data: 'reset_ventas_confirm' },
+                { text: '❌ Cancelar', callback_data: 'reset_ventas_cancel' }
+            ]] }
+        });
+    }
+
+    if (data === 'reset_ventas_confirm') {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        sales.length = 0;
+        fs.writeFileSync(SALES_FILE, JSON.stringify(sales, null, 2));
+        bot.answerCallbackQuery(cq.id, { text: '✅ Contador reiniciado.' });
+        return bot.editMessageText('✅ Contador de ventas reiniciado a 0.', { chat_id: chatId, message_id: cq.message.message_id });
+    }
+
+    if (data === 'reset_ventas_cancel') {
+        bot.answerCallbackQuery(cq.id, { text: 'Cancelado.' });
+        return bot.editMessageText('❌ Reinicio cancelado, el contador sigue igual.', { chat_id: chatId, message_id: cq.message.message_id });
+    }
+
     if (data.startsWith('buy_')) {
         const productId = data.replace('buy_', '');
         const product    = catalog.items[productId];
@@ -412,6 +475,7 @@ Selecciona método de pago:`,
             }
 
             const methodLabel = method === 'stripe' ? '💳 Stripe' : '🏦 Paddle';
+            saveCheckoutMeta(txId, description);
             const linkId      = saveLink({ amount, description, method, url });
             const payPageUrl  = `${APP_BASE_URL}/pay/${linkId}`;
             const secureButton = { inline_keyboard: [[{ text: '🔒 Ver pago seguro', web_app: { url: payPageUrl } }]] };
@@ -469,17 +533,21 @@ app.post('/webhook/paddle', (req, res) => {
     try { event = JSON.parse(req.body); } catch { return res.status(400).send('Bad JSON'); }
 
     if (event.event_type === 'transaction.completed') {
-        const tx    = event.data;
-        const total = tx.details?.totals?.total;
+        const tx          = event.data;
+        const total       = tx.details?.totals?.total;
+        const amount      = total ? parseInt(total) / 100 : null;
+        const currency    = tx.currency_code || 'USD';
+        const description = tx.items?.[0]?.price?.description || 'Pedido';
         bot.sendMessage(ADMIN_CHAT_ID,
 `💰 <b>¡Pago recibido! (Paddle)</b>
 ━━━━━━━━━━━━━━
-✅ <b>Monto:</b> $${total ? (parseInt(total) / 100).toFixed(2) : '?'} ${tx.currency_code || 'USD'}
-📝 ${tx.items?.[0]?.price?.description || 'Pedido'}
+✅ <b>Monto:</b> $${amount ? amount.toFixed(2) : '?'} ${currency}
+📝 ${description}
 👤 ${tx.customer?.email || 'N/A'}
 🔖 <code>${tx.id}</code>`,
             { parse_mode: 'HTML' }
         ).catch(() => {});
+        if (amount) recordSale({ date: new Date().toISOString(), method: 'paddle', amount, currency, description, txId: tx.id });
     }
     res.status(200).send('OK');
 });
@@ -500,16 +568,20 @@ app.post('/webhook/stripe', (req, res) => {
     }
 
     if (event.type === 'checkout.session.completed') {
-        const session = event.data.object;
-        const amount  = session.amount_total ? (session.amount_total / 100).toFixed(2) : '?';
+        const session     = event.data.object;
+        const amount      = session.amount_total ? session.amount_total / 100 : null;
+        const currency    = (session.currency || 'usd').toUpperCase();
+        const description = checkoutMeta.get(session.id) || 'Pedido';
         bot.sendMessage(ADMIN_CHAT_ID,
 `💰 <b>¡Pago recibido! (Stripe)</b>
 ━━━━━━━━━━━━━━
-✅ <b>Monto:</b> $${amount} ${(session.currency || 'usd').toUpperCase()}
+✅ <b>Monto:</b> $${amount ? amount.toFixed(2) : '?'} ${currency}
+📝 ${description}
 👤 ${session.customer_details?.email || 'N/A'}
 🔖 <code>${session.id}</code>`,
             { parse_mode: 'HTML' }
         ).catch(() => {});
+        if (amount) recordSale({ date: new Date().toISOString(), method: 'stripe', amount, currency, description, txId: session.id });
     }
     res.status(200).send('OK');
 });
