@@ -433,7 +433,9 @@ async function postToChannel(fromChatId, text, editTarget) {
 
         const postUrl = CHANNEL_ID.startsWith('@') ? `https://t.me/${CHANNEL_ID.slice(1)}/${sent.message_id}` : null;
         const confirmText = `✅ Publicado en ${CHANNEL_ID}.`;
-        const confirmKeyboard = postUrl ? [[{ text: '👀 Ver publicación', url: postUrl }], [menuButton]] : [[menuButton]];
+        const viewRow   = postUrl ? [{ text: '👀 Ver publicación', url: postUrl }] : null;
+        const deleteRow = [{ text: '🗑️ Borrar publicación', callback_data: `del_canal_${sent.message_id}` }];
+        const confirmKeyboard = [...(viewRow ? [viewRow] : []), deleteRow, [menuButton]];
 
         if (editTarget) {
             await bot.editMessageText(confirmText, { chat_id: editTarget.chatId, message_id: editTarget.messageId, reply_markup: { inline_keyboard: confirmKeyboard } })
@@ -698,6 +700,24 @@ bot.on('callback_query', async (cq) => {
         return bot.editMessageText(`📢 Envía el texto que quieres publicar en ${CHANNEL_ID}.`,
             { chat_id: chatId, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
         ).catch(() => {});
+    }
+
+    if (data.startsWith('del_canal_')) {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        const canalMessageId = data.replace('del_canal_', '');
+        try {
+            await bot.deleteMessage(CHANNEL_ID, canalMessageId);
+            bot.answerCallbackQuery(cq.id, { text: '🗑️ Publicación borrada.' });
+            await bot.editMessageText(`🗑️ Publicación borrada de ${CHANNEL_ID}.`,
+                { chat_id: chatId, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
+            ).catch(() => {});
+        } catch (err) {
+            bot.answerCallbackQuery(cq.id, { text: '❌ No se pudo borrar.' });
+            await bot.editMessageText(`❌ No se pudo borrar la publicación: ${err.message}`,
+                { chat_id: chatId, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
+            ).catch(() => {});
+        }
+        return;
     }
 
     if (data === 'panel_operadores') {
