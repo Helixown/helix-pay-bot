@@ -76,6 +76,7 @@ const awaitingBankDetails = new Map(); // chatId del operador -> { transferId, c
 const pendingTransfers    = new Map(); // transferId -> { customerChatId, amount, description, operatorChatId }
 const transferByCustomer  = new Map(); // customerChatId -> { transferId, operatorChatId }
 const awaitingDelivery    = new Map(); // chatId del operador -> { customerChatId }
+const transferMessages    = new Map(); // `${operatorChatId}:${messageId}` -> transferId (para responder con reply y confirmar+entregar)
 
 // ── Payment landing pages (mini app) ─────────────────────────────────────────
 const paymentLinks = new Map();
@@ -544,40 +545,31 @@ Escribe en un solo mensaje los datos bancarios (CLABE, banco, titular) y se los 
                 txId = tx.id;
             }
 
-            const methodLabel = method === 'stripe' ? '💳 Stripe' : '🏦 Paddle';
             saveCheckoutMeta(txId, description);
             const linkId      = saveLink({ amount, description, method, url });
             const payPageUrl  = `${APP_BASE_URL}/pay/${linkId}`;
-            const secureButton = { inline_keyboard: [[{ text: '🔒 Ver pago seguro', web_app: { url: payPageUrl } }]] };
+            const secureButton = { inline_keyboard: [[{ text: 'Pagar', web_app: { url: payPageUrl } }]] };
 
             await bot.sendMessage(replyChatId,
-`✅ <b>Link generado (${methodLabel})</b>
-━━━━━━━━━━━━━━
-💰 <b>Monto:</b> $${parseFloat(amount).toFixed(2)} USD
-📝 <b>Descripción:</b> ${description}
-🔖 <b>ID:</b> <code>${txId}</code>`,
+                `💰 <b>$${parseFloat(amount).toFixed(2)} USD</b> — ${description}`,
                 { parse_mode: 'HTML', reply_markup: secureButton }
             );
 
-            if (replyChatId !== ADMIN_CHAT_ID) {
-                const fromOperator = isAllowed(replyChatId);
-                const label = fromOperator ? '📋 Cobro generado por operador' : '🛒 Nueva compra desde la tienda';
-                const who   = fromOperator ? `<code>${replyChatId}</code>` : `${cq.from.username ? '@' + cq.from.username : cq.from.first_name} (<code>${replyChatId}</code>)`;
-                await bot.sendMessage(ADMIN_CHAT_ID,
+            const fromOperator = isAllowed(replyChatId);
+            const label = replyChatId === ADMIN_CHAT_ID ? '🧾 Cobro generado'
+                : fromOperator ? '📋 Cobro generado por operador' : '🛒 Nueva compra desde la tienda';
+            const who = fromOperator ? `<code>${replyChatId}</code>` : `${cq.from.username ? '@' + cq.from.username : cq.from.first_name} (<code>${replyChatId}</code>)`;
+            await bot.sendMessage(ADMIN_CHAT_ID,
 `${label}
 👤 ${who}
 💰 $${parseFloat(amount).toFixed(2)} USD — ${description}
 🔖 <code>${txId}</code>`,
-                    { parse_mode: 'HTML' }
-                ).catch(() => {});
-            }
+                { parse_mode: 'HTML' }
+            ).catch(() => {});
 
             if (targetChatId && targetChatId !== replyChatId) {
                 await bot.sendMessage(targetChatId,
-`💳 <b>Link de pago</b>
-━━━━━━━━━━━━━━
-💰 <b>Monto:</b> $${parseFloat(amount).toFixed(2)} USD
-📝 ${description}`,
+                    `💰 <b>$${parseFloat(amount).toFixed(2)} USD</b> — ${description}`,
                     { parse_mode: 'HTML', reply_markup: secureButton }
                 ).catch(() => bot.sendMessage(replyChatId, `⚠️ No se pudo enviar al cliente (${targetChatId}). Reenvía tú el link.`));
             }
@@ -591,6 +583,31 @@ Escribe en un solo mensaje los datos bancarios (CLABE, banco, titular) y se los 
 // ── Captura de datos bancarios (transferencia MXN) ────────────────────────────
 bot.on('message', (msg) => {
     const chatId = msg.chat.id;
+
+    // Responder (reply) al comprobante con la cuenta = confirmar + entregar en un solo paso
+    if (msg.reply_to_message) {
+        const transferId = transferMessages.get(`${chatId}:${msg.reply_to_message.message_id}`);
+        if (transferId) {
+            const transfer = pendingTransfers.get(transferId);
+            if (!transfer) {
+                bot.sendMessage(chatId, '❌ Esta transferencia ya no está pendiente (expiró o ya se confirmó).');
+                return;
+            }
+            pendingTransfers.delete(transferId);
+            if (transfer.customerChatId) transferByCustomer.delete(transfer.customerChatId);
+            recordSale({ date: new Date().toISOString(), method: 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId });
+
+            if (transfer.customerChatId) {
+                bot.copyMessage(transfer.customerChatId, chatId, msg.message_id)
+                    .then(() => bot.sendMessage(transfer.customerChatId, '✅ ¡Pago confirmado! Gracias por tu compra 🎉'))
+                    .then(() => bot.sendMessage(chatId, '✅ Confirmado y entregado al cliente.'))
+                    .catch(() => bot.sendMessage(chatId, '⚠️ Pago confirmado, pero no se pudo entregar al cliente automáticamente.'));
+            } else {
+                bot.sendMessage(chatId, '✅ Pago confirmado (no hay chat de cliente vinculado para entregar automáticamente).');
+            }
+            return;
+        }
+    }
 
     // Entrega de la cuenta/producto tras confirmar el pago -> copiar al cliente
     const delivery = awaitingDelivery.get(chatId);
@@ -606,10 +623,21 @@ bot.on('message', (msg) => {
     const awaitingProof = transferByCustomer.get(chatId);
     if (awaitingProof && !(msg.text && msg.text.startsWith('/'))) {
         bot.copyMessage(awaitingProof.operatorChatId, chatId, msg.message_id)
-            .catch(() => {})
-            .then(() => bot.sendMessage(awaitingProof.operatorChatId, '📎 Comprobante recibido del cliente (arriba 👆)', {
-                reply_markup: { inline_keyboard: [[{ text: '✅ Confirmar pago recibido', callback_data: `confirm_transfer_${awaitingProof.transferId}` }]] }
-            }).catch(() => {}));
+            .then((sent) => {
+                transferMessages.set(`${awaitingProof.operatorChatId}:${sent.message_id}`, awaitingProof.transferId);
+                setTimeout(() => transferMessages.delete(`${awaitingProof.operatorChatId}:${sent.message_id}`), 24 * 60 * 60 * 1000);
+                return bot.sendMessage(awaitingProof.operatorChatId,
+                    '📎 Comprobante recibido del cliente (arriba 👆). Responde a este mensaje con la cuenta para confirmar y entregársela junto con el agradecimiento, o usa el botón para solo confirmar.', {
+                        reply_markup: { inline_keyboard: [[{ text: '✅ Confirmar pago recibido', callback_data: `confirm_transfer_${awaitingProof.transferId}` }]] }
+                    });
+            })
+            .then((sent2) => {
+                if (sent2) {
+                    transferMessages.set(`${awaitingProof.operatorChatId}:${sent2.message_id}`, awaitingProof.transferId);
+                    setTimeout(() => transferMessages.delete(`${awaitingProof.operatorChatId}:${sent2.message_id}`), 24 * 60 * 60 * 1000);
+                }
+            })
+            .catch(() => {});
         return;
     }
 
@@ -628,8 +656,6 @@ bot.on('message', (msg) => {
         setTimeout(() => transferByCustomer.delete(customerChatId), 24 * 60 * 60 * 1000);
     }
 
-    const confirmButton = { inline_keyboard: [[{ text: '✅ Confirmar pago recibido', callback_data: `confirm_transfer_${transferId}` }]] };
-
     if (customerChatId) {
         bot.sendMessage(customerChatId,
 `🏧 <b>Datos para tu transferencia</b>
@@ -643,7 +669,7 @@ Envía tu comprobante aquí una vez hecho el pago.`,
         ).catch(() => {});
     }
 
-    bot.sendMessage(chatId, '✅ Datos enviados al cliente. Cuando confirmes que llegó el pago, toca el botón:', { reply_markup: confirmButton });
+    bot.sendMessage(chatId, '✅ Datos enviados al cliente. Te aviso cuando mande el comprobante.');
 });
 
 // ── Webhook Paddle ────────────────────────────────────────────────────────────
