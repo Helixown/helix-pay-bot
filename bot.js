@@ -79,6 +79,15 @@ function saveCheckoutMeta(txId, meta) {
     setTimeout(() => checkoutMeta.delete(txId), 24 * 60 * 60 * 1000);
 }
 
+// Aviso de pago confirmado: al admin con detalle completo, a los demás operadores sin el correo del cliente
+function notifyPaymentReceived(adminText, operatorText) {
+    bot.sendMessage(ADMIN_CHAT_ID, adminText, { parse_mode: 'HTML' }).catch(() => {});
+    for (const opId of operadores) {
+        if (opId === ADMIN_CHAT_ID) continue;
+        bot.sendMessage(opId, operatorText, { parse_mode: 'HTML' }).catch(() => {});
+    }
+}
+
 // Tras confirmarse un pago (Stripe/Paddle), pide la cuenta a entregar igual que en transferencia MXN
 function triggerDelivery(txId, description) {
     const meta = checkoutMeta.get(txId);
@@ -945,15 +954,19 @@ app.post('/webhook/paddle', (req, res) => {
         const amount      = total ? parseInt(total) / 100 : null;
         const currency    = tx.currency_code || 'USD';
         const description = tx.items?.[0]?.price?.description || 'Pedido';
-        bot.sendMessage(ADMIN_CHAT_ID,
+        notifyPaymentReceived(
 `💰 <b>¡Pago recibido! (Paddle)</b>
 ━━━━━━━━━━━━━━
 ✅ <b>Monto:</b> $${amount ? amount.toFixed(2) : '?'} ${currency}
 📝 ${description}
 👤 ${tx.customer?.email || 'N/A'}
 🔖 <code>${tx.id}</code>`,
-            { parse_mode: 'HTML' }
-        ).catch(() => {});
+`💰 <b>¡Pago recibido! (Paddle)</b>
+━━━━━━━━━━━━━━
+✅ <b>Monto:</b> $${amount ? amount.toFixed(2) : '?'} ${currency}
+📝 ${description}
+🔖 <code>${tx.id}</code>`
+        );
         if (amount) recordSale({ date: new Date().toISOString(), method: 'paddle', amount, currency, description, txId: tx.id });
         triggerDelivery(tx.id, description);
     }
@@ -980,15 +993,19 @@ app.post('/webhook/stripe', (req, res) => {
         const amount      = session.amount_total ? session.amount_total / 100 : null;
         const currency    = (session.currency || 'usd').toUpperCase();
         const description = checkoutMeta.get(session.id)?.description || 'Pedido';
-        bot.sendMessage(ADMIN_CHAT_ID,
+        notifyPaymentReceived(
 `💰 <b>¡Pago recibido! (Stripe)</b>
 ━━━━━━━━━━━━━━
 ✅ <b>Monto:</b> $${amount ? amount.toFixed(2) : '?'} ${currency}
 📝 ${description}
 👤 ${session.customer_details?.email || 'N/A'}
 🔖 <code>${session.id}</code>`,
-            { parse_mode: 'HTML' }
-        ).catch(() => {});
+`💰 <b>¡Pago recibido! (Stripe)</b>
+━━━━━━━━━━━━━━
+✅ <b>Monto:</b> $${amount ? amount.toFixed(2) : '?'} ${currency}
+📝 ${description}
+🔖 <code>${session.id}</code>`
+        );
         if (amount) recordSale({ date: new Date().toISOString(), method: 'stripe', amount, currency, description, txId: session.id });
         triggerDelivery(session.id, description);
     }
