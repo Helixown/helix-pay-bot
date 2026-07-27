@@ -88,6 +88,15 @@ function savePending(amount, description, targetChatId, operatorChatId) {
     return id;
 }
 
+function metodoPagoPanel(pendingId, amount, description, showCatalogoBack) {
+    const row1 = [];
+    if (stripe) row1.push({ text: '💳 Tarjeta (Stripe)', callback_data: `pay_s_${pendingId}` });
+    row1.push({ text: '🏦 PayPal (Paddle)', callback_data: `pay_p_${pendingId}` });
+    const keyboard = [row1, [{ text: '🏧 Transferencia MXN', callback_data: `pay_t_${pendingId}` }]];
+    if (showCatalogoBack) keyboard.push([{ text: '⬅️ Volver al catálogo', callback_data: 'back_tienda' }]);
+    return { text: `💰 <b>$${parseFloat(amount).toFixed(2)} USD</b> — ${description}\nSelecciona método de pago:`, keyboard };
+}
+
 // ── Transferencia MXN manual (in-memory) ─────────────────────────────────────
 const awaitingBankUpdate  = new Set(); // chatId del operador que va a enviar el texto para actualizar los datos bancarios
 const pendingTransfers    = new Map(); // transferId -> { customerChatId, amount, description, operatorChatId }
@@ -547,16 +556,9 @@ bot.onText(/\/cobrar(?:\s+(.+))?/, async (msg, match) => {
     }
     const description = descParts.join(' ') || 'Pedido personalizado';
     const pendingId   = savePending(amount, description, targetChatId, chatId);
+    const panel       = metodoPagoPanel(pendingId, amount, description, false);
 
-    const row1 = [];
-    if (stripe) row1.push({ text: '💳 Tarjeta (Stripe)', callback_data: `pay_s_${pendingId}` });
-    row1.push({ text: '🏦 PayPal (Paddle)', callback_data: `pay_p_${pendingId}` });
-
-    await bot.sendMessage(chatId,
-`💰 <b>$${parseFloat(amount).toFixed(2)} USD</b> — ${description}
-Selecciona método de pago:`,
-        { parse_mode: 'HTML', reply_markup: { inline_keyboard: [row1, [{ text: '🏧 Transferencia MXN', callback_data: `pay_t_${pendingId}` }]] } }
-    );
+    await bot.sendMessage(chatId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
 });
 
 // ── Callbacks ─────────────────────────────────────────────────────────────────
@@ -663,15 +665,10 @@ bot.on('callback_query', async (cq) => {
 
         bot.answerCallbackQuery(cq.id);
         const pendingId = savePending(product.price, product.name, null, chatId);
-        const row1 = [];
-        if (stripe) row1.push({ text: '💳 Tarjeta (Stripe)', callback_data: `pay_s_${pendingId}` });
-        row1.push({ text: '🏦 PayPal (Paddle)', callback_data: `pay_p_${pendingId}` });
+        const panel     = metodoPagoPanel(pendingId, product.price, product.name, true);
 
-        const text = `💰 <b>$${product.price.toFixed(2)} USD</b> — ${product.name}\nSelecciona método de pago:`;
-        const keyboard = [row1, [{ text: '🏧 Transferencia MXN', callback_data: `pay_t_${pendingId}` }], [{ text: '⬅️ Volver al catálogo', callback_data: 'back_tienda' }]];
-
-        return bot.editMessageText(text, { chat_id: chatId, message_id: cq.message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } })
-            .catch(() => bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } }));
+        return bot.editMessageText(panel.text, { chat_id: chatId, message_id: cq.message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } })
+            .catch(() => bot.sendMessage(chatId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } }));
     }
 
     if (data.startsWith('pay_t_')) {
@@ -757,6 +754,25 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
         return;
     }
 
+    if (data.startsWith('pay_back_')) {
+        const pendingId = data.replace('pay_back_', '');
+        const pending   = pendingPayments.get(pendingId);
+
+        if (!pending) {
+            bot.answerCallbackQuery(cq.id, { text: '❌ Solicitud expirada.' });
+            return bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: cq.message.message_id }).catch(() => {});
+        }
+
+        bot.answerCallbackQuery(cq.id);
+        const { amount, description, operatorChatId } = pending;
+        const replyChatId       = operatorChatId || ADMIN_CHAT_ID;
+        const showCatalogoBack  = !isAllowed(replyChatId);
+        const panel = metodoPagoPanel(pendingId, amount, description, showCatalogoBack);
+
+        return bot.editMessageText(panel.text, { chat_id: chatId, message_id: cq.message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } })
+            .catch(() => bot.sendMessage(chatId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } }));
+    }
+
     if (data.startsWith('pay_s_') || data.startsWith('pay_p_')) {
         const method    = data.startsWith('pay_s_') ? 'stripe' : 'paddle';
         const pendingId = data.replace(/^pay_[sp]_/, '');
@@ -787,23 +803,16 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
             saveCheckoutMeta(txId, description);
             const linkId      = saveLink({ amount, description, method, url });
             const payPageUrl  = `${APP_BASE_URL}/pay/${linkId}`;
-            const secureButton = { inline_keyboard: [[{ text: 'Pagar', web_app: { url: payPageUrl } }]] };
+            const secureButton = { inline_keyboard: [
+                [{ text: 'Pagar', web_app: { url: payPageUrl } }],
+                [{ text: '⬅️ Volver', callback_data: `pay_back_${pendingId}` }]
+            ] };
             const panelText = `💰 <b>$${parseFloat(amount).toFixed(2)} USD</b> — ${description}`;
 
             await bot.editMessageText(panelText, { chat_id: replyChatId, message_id: cq.message.message_id, parse_mode: 'HTML', reply_markup: secureButton })
                 .catch(() => bot.sendMessage(replyChatId, panelText, { parse_mode: 'HTML', reply_markup: secureButton }));
 
-            const fromOperator = isAllowed(replyChatId);
-            const label = replyChatId === ADMIN_CHAT_ID ? '🧾 Cobro generado'
-                : fromOperator ? '📋 Cobro generado por operador' : '🛒 Nueva compra desde la tienda';
-            const who = fromOperator ? `<code>${replyChatId}</code>` : `${cq.from.username ? '@' + cq.from.username : cq.from.first_name} (<code>${replyChatId}</code>)`;
-            await bot.sendMessage(ADMIN_CHAT_ID,
-`${label}
-👤 ${who}
-💰 $${parseFloat(amount).toFixed(2)} USD — ${description}
-🔖 <code>${txId}</code>`,
-                { parse_mode: 'HTML' }
-            ).catch(() => {});
+            // La notificación al admin se manda desde el webhook, una vez que el pago se confirma de verdad (ver más abajo).
 
             if (targetChatId && targetChatId !== replyChatId) {
                 await bot.sendMessage(targetChatId,
