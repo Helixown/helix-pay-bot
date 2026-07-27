@@ -87,7 +87,7 @@ function formatDelivery(text, description) {
     const esc = (s) => s.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
     const match = String(description).match(/\d+(\.\d+)?/);
     const value = match ? match[0] : description;
-    return `🎉 <b>¡Gracias por tu compra!</b>\n\n<code>${esc(email)}</code>\n\n<code>${esc(password)}</code>\n\n${value}`;
+    return `🎉 <b>¡Gracias por tu compra!</b>\n\nEmail: <code>${esc(email)}</code>\nPass: <code>${esc(password)}</code>\n\n${value}`;
 }
 
 // ── Payment landing pages (mini app) ─────────────────────────────────────────
@@ -732,7 +732,7 @@ bot.on('message', async (msg) => {
 
 ${bankDetails}
 
-Envía tu comprobante aquí una vez hecho el pago.`,
+Envía la foto de tu comprobante aquí una vez hecho el pago.`,
             { parse_mode: 'HTML' }
         ).catch(() => {});
     }
