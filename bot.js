@@ -31,6 +31,103 @@ function savePending(amount, description, targetChatId, operatorChatId) {
     return id;
 }
 
+// ── Payment landing pages (mini app) ─────────────────────────────────────────
+const paymentLinks = new Map();
+function saveLink(data) {
+    const id = crypto.randomBytes(4).toString('hex');
+    paymentLinks.set(id, data);
+    setTimeout(() => paymentLinks.delete(id), 30 * 60 * 1000); // expira en 30 min
+    return id;
+}
+
+const STRIPE_LOGO_SVG = `<svg viewBox="0 0 468 222" xmlns="http://www.w3.org/2000/svg" fill="#635BFF"><path d="M414 113.4c0-25.6-12.4-45.8-36.1-45.8-23.8 0-38.2 20.2-38.2 45.6 0 30.1 17 45.3 41.4 45.3 11.9 0 20.9-2.7 27.7-6.5v-20c-6.8 3.4-14.6 5.5-24.5 5.5-9.7 0-18.3-3.4-19.4-15.2h48.9c0-1.3.2-6.5.2-8.9zm-49.4-9.5c0-11.3 6.9-16 13.2-16 6.1 0 12.6 4.7 12.6 16h-25.8zM301.1 67.6c-9.8 0-16.1 4.6-19.6 7.8l-1.3-6.2h-22v116.6l25-5.3.1-28.3c3.6 2.6 8.9 6.3 17.7 6.3 17.9 0 34.2-14.4 34.2-46.1-.1-29-16.6-44.8-34.1-44.8zm-6 68.9c-5.9 0-9.4-2.1-11.8-4.7l-.1-37.1c2.6-2.9 6.2-4.9 11.9-4.9 9.1 0 15.4 10.2 15.4 23.3 0 13.4-6.2 23.4-15.4 23.4zM223.8 61.7l25.1-5.4V36l-25.1 5.3zM223.8 69.3h25.1v88.3h-25.1zM196.9 76.7l-1.6-7.4h-21.6v88.3h25V97.5c5.9-7.7 15.9-6.3 19-5.2v-23c-3.2-1.2-14.9-3.4-20.8 7.4zM146.9 47.6l-24.4 5.2-.1 80.1c0 14.8 11.1 25.7 25.9 25.7 8.2 0 14.2-1.5 17.5-3.3v-20.3c-3.2 1.3-19 5.9-19-8.9V90.6h19V69.3h-19l.1-21.7zM79.3 95.5c0-3.9 3.2-5.4 8.5-5.4 7.6 0 17.2 2.3 24.8 6.4V72.2c-8.3-3.3-16.5-4.6-24.8-4.6C67.5 67.6 54 78.2 54 95.9c0 27.6 38 23.2 38 35.1 0 4.6-4 6.1-9.6 6.1-8.3 0-18.9-3.4-27.3-8v24.3c9.3 4 18.7 5.7 27.3 5.7 20.8 0 35.1-10.3 35.1-28.2-.1-29.8-38.2-24.5-38.2-35.4z"/></svg>`;
+const PADDLE_LOGO_SVG = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="#1A1A1A"><circle cx="12" cy="12" r="11" fill="none" stroke="#1A1A1A" stroke-width="2"/><path d="M12 6a6 6 0 1 0 6 6h-2a4 4 0 1 1-4-4V6z"/></svg>`;
+
+function renderPayPage({ amount, description, method, url }) {
+    const methodLabel = method === 'stripe' ? 'Stripe' : 'Paddle';
+    const logoSvg = method === 'stripe' ? STRIPE_LOGO_SVG : PADDLE_LOGO_SVG;
+    const safeDesc = String(description).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+    return `<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pago seguro</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 20px 32px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--tg-theme-bg-color, #ffffff);
+    color: var(--tg-theme-text-color, #111111);
+    display: flex; flex-direction: column; min-height: 100vh;
+  }
+  .lock { text-align: center; font-size: 48px; margin: 12px 0 4px; }
+  h1 { text-align: center; font-size: 20px; margin: 0 0 4px; }
+  .sub { text-align: center; font-size: 14px; opacity: .7; margin-bottom: 24px; }
+  .card {
+    background: var(--tg-theme-secondary-bg-color, #f2f2f7);
+    border-radius: 14px; padding: 18px; margin-bottom: 16px;
+  }
+  .row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 15px; }
+  .row span:first-child { opacity: .65; }
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 8px 0 24px; }
+  .badge {
+    display: flex; align-items: center; gap: 6px;
+    background: var(--tg-theme-secondary-bg-color, #f2f2f7);
+    border-radius: 20px; padding: 8px 14px; font-size: 13px;
+  }
+  .badge svg { height: 14px; width: auto; }
+  .logo-row { display: flex; justify-content: center; margin: 4px 0 20px; }
+  .logo-row svg { height: 24px; width: auto; }
+  .spacer { flex: 1; }
+  button {
+    width: 100%; padding: 16px; border: none; border-radius: 12px;
+    background: var(--tg-theme-button-color, #2ea6ff);
+    color: var(--tg-theme-button-text-color, #ffffff);
+    font-size: 16px; font-weight: 600; cursor: pointer;
+  }
+  .foot { text-align: center; font-size: 12px; opacity: .55; margin-top: 14px; }
+</style>
+</head>
+<body>
+  <div class="lock">🔒</div>
+  <h1>Pago protegido</h1>
+  <div class="sub">Procesado por ${methodLabel}, no almacenamos tus datos de tarjeta</div>
+
+  <div class="logo-row">${logoSvg}</div>
+
+  <div class="card">
+    <div class="row"><span>Monto</span><b>$${parseFloat(amount).toFixed(2)} USD</b></div>
+    <div class="row"><span>Descripción</span><b>${safeDesc}</b></div>
+    <div class="row"><span>Procesador</span><b>${methodLabel}</b></div>
+  </div>
+
+  <div class="badges">
+    <div class="badge">🔐 Cifrado SSL</div>
+    <div class="badge">✅ PCI DSS</div>
+    <div class="badge">${logoSvg} Verificado</div>
+  </div>
+
+  <div class="spacer"></div>
+  <button id="go">Continuar al pago seguro</button>
+  <div class="foot">Serás redirigido al checkout oficial de ${methodLabel}</div>
+
+<script>
+  const tg = window.Telegram?.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+  document.getElementById('go').addEventListener('click', () => {
+    const url = ${JSON.stringify(url)};
+    if (tg && tg.openLink) { tg.openLink(url); }
+    else { window.location.href = url; }
+  });
+</script>
+</body>
+</html>`;
+}
+
 // ── Paddle API ────────────────────────────────────────────────────────────────
 const paddle = axios.create({
     baseURL: 'https://api.paddle.com',
@@ -208,6 +305,10 @@ bot.on('callback_query', async (cq) => {
             }
 
             const methodLabel = method === 'stripe' ? '💳 Stripe' : '🏦 Paddle';
+            const linkId      = saveLink({ amount, description, method, url });
+            const payPageUrl  = `${PUBLIC_URL}/pay/${linkId}`;
+            const secureButton = { inline_keyboard: [[{ text: '🔒 Ver pago seguro', web_app: { url: payPageUrl } }]] };
+
             await bot.sendMessage(replyChatId,
 `✅ <b>Link generado (${methodLabel})</b>
 ━━━━━━━━━━━━━━
@@ -216,7 +317,7 @@ bot.on('callback_query', async (cq) => {
 🔖 <b>ID:</b> <code>${txId}</code>
 
 🔗 ${url}`,
-                { parse_mode: 'HTML', disable_web_page_preview: true }
+                { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: secureButton }
             );
 
             if (replyChatId !== ADMIN_CHAT_ID) {
@@ -236,7 +337,7 @@ bot.on('callback_query', async (cq) => {
 📝 ${description}
 
 🔗 ${url}`,
-                    { parse_mode: 'HTML', disable_web_page_preview: true }
+                    { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: secureButton }
                 ).catch(() => bot.sendMessage(replyChatId, `⚠️ No se pudo enviar al cliente (${targetChatId}). Reenvía tú el link.`));
             }
         } catch (err) {
@@ -304,6 +405,12 @@ app.post('/webhook/stripe', (req, res) => {
         ).catch(() => {});
     }
     res.status(200).send('OK');
+});
+
+app.get('/pay/:id', (req, res) => {
+    const data = paymentLinks.get(req.params.id);
+    if (!data) return res.status(404).send('<h2>❌ Este enlace de pago expiró.</h2>');
+    res.send(renderPayPage(data));
 });
 
 app.use(express.json());
