@@ -3,6 +3,8 @@ const TelegramBot = require('node-telegram-bot-api');
 const express    = require('express');
 const axios      = require('axios');
 const crypto     = require('crypto');
+const fs         = require('fs');
+const path       = require('path');
 const Stripe     = require('stripe');
 
 const BOT_TOKEN             = process.env.BOT_TOKEN;
@@ -22,6 +24,15 @@ const stripe = STRIPE_SECRET_KEY ? Stripe(STRIPE_SECRET_KEY) : null;
 // ── Operadores ────────────────────────────────────────────────────────────────
 const operadores = new Set([ADMIN_CHAT_ID]);
 function isAllowed(chatId) { return operadores.has(chatId); }
+
+// ── Catálogo de productos ─────────────────────────────────────────────────────
+const PRODUCTS_FILE = process.env.PRODUCTS_FILE || path.join(__dirname, 'products.json');
+function loadCatalog() {
+    try { return JSON.parse(fs.readFileSync(PRODUCTS_FILE, 'utf8')); }
+    catch { return { nextId: 1, items: {} }; }
+}
+const catalog = loadCatalog();
+function saveCatalog() { fs.writeFileSync(PRODUCTS_FILE, JSON.stringify(catalog, null, 2)); }
 
 // ── Pending payments (in-memory) ─────────────────────────────────────────────
 const pendingPayments = new Map();
@@ -213,6 +224,46 @@ bot.onText(/\/operadores/, (msg) => {
     bot.sendMessage(msg.chat.id, `👥 <b>Operadores activos:</b>\n${lista}`, { parse_mode: 'HTML' });
 });
 
+bot.onText(/\/addproducto(?:\s+(.+))?/, (msg, match) => {
+    if (!isAllowed(msg.chat.id)) return;
+    const args  = (match[1] || '').trim().split(/\s+/);
+    const price = parseFloat(args[0]);
+    const name  = args.slice(1).join(' ');
+    if (!price || isNaN(price) || price <= 0 || !name) {
+        return bot.sendMessage(msg.chat.id, '❌ Uso: /addproducto <precio> <nombre>\nEjemplo: /addproducto 15 Cuenta Premium 1 mes');
+    }
+    const id = String(catalog.nextId++);
+    catalog.items[id] = { name, price };
+    saveCatalog();
+    bot.sendMessage(msg.chat.id, `✅ Producto agregado.\n🆔 <code>${id}</code>\n📦 ${name}\n💰 $${price.toFixed(2)} USD`, { parse_mode: 'HTML' });
+});
+
+bot.onText(/\/delproducto(?:\s+(\d+))?/, (msg, match) => {
+    if (!isAllowed(msg.chat.id)) return;
+    const id = match[1];
+    if (!id || !catalog.items[id]) return bot.sendMessage(msg.chat.id, '❌ Uso: /delproducto <id>\nUsa /listproductos para ver los IDs.');
+    const name = catalog.items[id].name;
+    delete catalog.items[id];
+    saveCatalog();
+    bot.sendMessage(msg.chat.id, `✅ Producto <code>${id}</code> (${name}) eliminado.`, { parse_mode: 'HTML' });
+});
+
+bot.onText(/\/listproductos/, (msg) => {
+    if (!isAllowed(msg.chat.id)) return;
+    const ids = Object.keys(catalog.items);
+    if (!ids.length) return bot.sendMessage(msg.chat.id, '📦 Catálogo vacío. Usa /addproducto <precio> <nombre>.');
+    const lista = ids.map(id => `• <code>${id}</code> — ${catalog.items[id].name} — $${catalog.items[id].price.toFixed(2)}`).join('\n');
+    bot.sendMessage(msg.chat.id, `📦 <b>Catálogo</b>\n${lista}`, { parse_mode: 'HTML' });
+});
+
+bot.onText(/\/tienda/, (msg) => {
+    const chatId = msg.chat.id;
+    const ids = Object.keys(catalog.items);
+    if (!ids.length) return bot.sendMessage(chatId, '🛒 No hay productos disponibles por el momento.');
+    const buttons = ids.map(id => ([{ text: `${catalog.items[id].name} — $${catalog.items[id].price.toFixed(2)}`, callback_data: `buy_${id}` }]));
+    bot.sendMessage(chatId, '🛒 <b>Tienda</b>\nElige un producto:', { parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
+});
+
 bot.onText(/\/start/, (msg) => {
     if (!isAllowed(msg.chat.id)) return;
     const hasStripe = !!stripe;
@@ -225,6 +276,11 @@ ${hasStripe ? '✅' : '❌'} Stripe (tarjeta)
 
 <b>Cobros:</b>
 /cobrar <code>&lt;monto&gt; [descripción] [chatId]</code>
+
+<b>Catálogo (tienda pública /tienda):</b>
+/addproducto <code>&lt;precio&gt; &lt;nombre&gt;</code>
+/listproductos
+/delproducto <code>&lt;id&gt;</code>
 ${isAdmin ? `
 <b>Operadores:</b>
 /addoperador <code>&lt;chatId&gt;</code>
@@ -234,7 +290,8 @@ ${isAdmin ? `
 <b>Ejemplos:</b>
 <code>/cobrar 50</code>
 <code>/cobrar 50 10 cuentas premium</code>
-<code>/cobrar 50 10 cuentas 123456789</code>`,
+<code>/cobrar 50 10 cuentas 123456789</code>
+<code>/addproducto 15 Cuenta Premium 1 mes</code>`,
         { parse_mode: 'HTML' }
     );
 });
@@ -273,8 +330,26 @@ Selecciona método de pago:`,
 
 // ── Callbacks ─────────────────────────────────────────────────────────────────
 bot.on('callback_query', async (cq) => {
-    if (!isAllowed(cq.message.chat.id)) return bot.answerCallbackQuery(cq.id);
-    const data = cq.data;
+    const data   = cq.data;
+    const chatId = cq.message.chat.id;
+
+    if (data.startsWith('buy_')) {
+        const productId = data.replace('buy_', '');
+        const product    = catalog.items[productId];
+        if (!product) return bot.answerCallbackQuery(cq.id, { text: '❌ Producto no disponible.' });
+
+        bot.answerCallbackQuery(cq.id);
+        const pendingId = savePending(product.price, product.name, null, chatId);
+        const buttons = [];
+        if (stripe) buttons.push({ text: '💳 Tarjeta (Stripe)', callback_data: `pay_s_${pendingId}` });
+        buttons.push({ text: '🏦 PayPal (Paddle)', callback_data: `pay_p_${pendingId}` });
+
+        return bot.sendMessage(chatId,
+`💰 <b>$${product.price.toFixed(2)} USD</b> — ${product.name}
+Selecciona método de pago:`,
+            { parse_mode: 'HTML', reply_markup: { inline_keyboard: [buttons] } }
+        );
+    }
 
     if (data.startsWith('pay_s_') || data.startsWith('pay_p_')) {
         const method    = data.startsWith('pay_s_') ? 'stripe' : 'paddle';
@@ -321,8 +396,12 @@ bot.on('callback_query', async (cq) => {
             );
 
             if (replyChatId !== ADMIN_CHAT_ID) {
+                const fromOperator = isAllowed(replyChatId);
+                const label = fromOperator ? '📋 Cobro generado por operador' : '🛒 Nueva compra desde la tienda';
+                const who   = fromOperator ? `<code>${replyChatId}</code>` : `${cq.from.username ? '@' + cq.from.username : cq.from.first_name} (<code>${replyChatId}</code>)`;
                 await bot.sendMessage(ADMIN_CHAT_ID,
-`📋 <b>Cobro generado por operador</b>
+`${label}
+👤 ${who}
 💰 $${parseFloat(amount).toFixed(2)} USD — ${description}
 🔖 <code>${txId}</code>`,
                     { parse_mode: 'HTML' }
