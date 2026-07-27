@@ -86,8 +86,8 @@ function formatDelivery(text, description) {
     const password = text.slice(sep + 1).trim();
     const esc = (s) => s.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
     const match = String(description).match(/\d+(\.\d+)?/);
-    const value = match ? match[0] : description;
-    return `🎉 <b>¡Gracias por tu compra!</b>\n\nEmail: <code>${esc(email)}</code>\nPass: <code>${esc(password)}</code>\n\n${value}`;
+    const value = match ? `💰 $${match[0]}` : description;
+    return `🎉 <b>¡Gracias por tu compra!</b>\n\n📧 Email: <code>${esc(email)}</code>\n\n🔑 Pass: <code>${esc(password)}</code>\n\n${value}`;
 }
 
 // ── Payment landing pages (mini app) ─────────────────────────────────────────
