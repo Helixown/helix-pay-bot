@@ -12,6 +12,7 @@ const PADDLE_WEBHOOK_SECRET = process.env.PADDLE_WEBHOOK_SECRET || '';
 const STRIPE_SECRET_KEY     = process.env.STRIPE_SECRET_KEY || '';
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 const PUBLIC_URL            = process.env.PUBLIC_URL || 'https://helix-pay-bot-production.up.railway.app';
+const APP_BASE_URL          = process.env.APP_BASE_URL || 'https://helix-pay-bot-production.up.railway.app';
 const PORT                  = process.env.PORT || 3000;
 
 const bot    = new TelegramBot(BOT_TOKEN, { polling: true });
@@ -306,7 +307,7 @@ bot.on('callback_query', async (cq) => {
 
             const methodLabel = method === 'stripe' ? '💳 Stripe' : '🏦 Paddle';
             const linkId      = saveLink({ amount, description, method, url });
-            const payPageUrl  = `${PUBLIC_URL}/pay/${linkId}`;
+            const payPageUrl  = `${APP_BASE_URL}/pay/${linkId}`;
             const secureButton = { inline_keyboard: [[{ text: '🔒 Ver pago seguro', web_app: { url: payPageUrl } }]] };
 
             await bot.sendMessage(replyChatId,
