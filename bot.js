@@ -21,6 +21,8 @@ const bot    = new TelegramBot(BOT_TOKEN, { polling: true });
 const app    = express();
 const stripe = STRIPE_SECRET_KEY ? Stripe(STRIPE_SECRET_KEY) : null;
 
+bot.setMyCommands([{ command: 'start', description: 'Iniciar' }]).catch(() => {});
+
 // ── Operadores ────────────────────────────────────────────────────────────────
 const operadores = new Set([ADMIN_CHAT_ID]);
 function isAllowed(chatId) { return operadores.has(chatId); }
@@ -256,16 +258,32 @@ bot.onText(/\/listproductos/, (msg) => {
     bot.sendMessage(msg.chat.id, `📦 <b>Catálogo</b>\n${lista}`, { parse_mode: 'HTML' });
 });
 
-bot.onText(/\/tienda/, (msg) => {
-    const chatId = msg.chat.id;
+function sendTienda(chatId) {
     const ids = Object.keys(catalog.items);
     if (!ids.length) return bot.sendMessage(chatId, '🛒 No hay productos disponibles por el momento.');
     const buttons = ids.map(id => ([{ text: `${catalog.items[id].name} — $${catalog.items[id].price.toFixed(2)}`, callback_data: `buy_${id}` }]));
-    bot.sendMessage(chatId, '🛒 <b>Tienda</b>\nElige un producto:', { parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
+    bot.sendMessage(chatId, '🛒 <b>JH STORE</b>\nElige un producto:', { parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
+}
+
+bot.onText(/\/tienda/, (msg) => {
+    if (!isAllowed(msg.chat.id)) return;
+    sendTienda(msg.chat.id);
 });
 
 bot.onText(/\/start/, (msg) => {
-    if (!isAllowed(msg.chat.id)) return;
+    const chatId = msg.chat.id;
+
+    if (!isAllowed(chatId)) {
+        return bot.sendMessage(chatId,
+`👋 <b>¡Bienvenido a JH STORE!</b>
+━━━━━━━━━━━━━━
+Productos y servicios digitales, con pago 100% seguro (Stripe / PayPal).
+
+Toca el botón de abajo para ver el catálogo.`,
+            { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🛒 Ver catálogo', callback_data: 'open_tienda' }]] } }
+        );
+    }
+
     const hasStripe = !!stripe;
     const isAdmin = msg.chat.id === ADMIN_CHAT_ID;
     bot.sendMessage(msg.chat.id,
@@ -332,6 +350,11 @@ Selecciona método de pago:`,
 bot.on('callback_query', async (cq) => {
     const data   = cq.data;
     const chatId = cq.message.chat.id;
+
+    if (data === 'open_tienda') {
+        bot.answerCallbackQuery(cq.id);
+        return sendTienda(chatId);
+    }
 
     if (data.startsWith('buy_')) {
         const productId = data.replace('buy_', '');
