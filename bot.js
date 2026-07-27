@@ -75,17 +75,19 @@ function savePending(amount, description, targetChatId, operatorChatId) {
 const awaitingBankDetails = new Map(); // chatId del operador -> { transferId, customerChatId, amount, description }
 const pendingTransfers    = new Map(); // transferId -> { customerChatId, amount, description, operatorChatId }
 const transferByCustomer  = new Map(); // customerChatId -> { transferId, operatorChatId }
-const awaitingDelivery    = new Map(); // chatId del operador -> { customerChatId, amount }
+const awaitingDelivery    = new Map(); // chatId del operador -> { customerChatId, description }
 const transferMessages    = new Map(); // `${operatorChatId}:${messageId}` -> transferId (para responder con reply y confirmar+entregar)
 
-// Si el texto es "correo:contraseña", arma el mensaje de entrega con el formato pedido (correo / contraseña / monto)
-function formatDelivery(text, amount) {
+// Si el texto es "correo:contraseña", arma el mensaje de entrega con el formato pedido (correo / contraseña / número de la descripción, ej. "Cuenta de 200" -> 200)
+function formatDelivery(text, description) {
     const sep = text.indexOf(':');
     if (sep === -1) return null;
     const email    = text.slice(0, sep).trim();
     const password = text.slice(sep + 1).trim();
     const esc = (s) => s.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
-    return `🎉 <b>¡Gracias por tu compra!</b>\n\n<code>${esc(email)}</code>\n\n<code>${esc(password)}</code>\n\n${parseFloat(amount)}`;
+    const match = String(description).match(/\d+(\.\d+)?/);
+    const value = match ? match[0] : description;
+    return `🎉 <b>¡Gracias por tu compra!</b>\n\n<code>${esc(email)}</code>\n\n<code>${esc(password)}</code>\n\n${value}`;
 }
 
 // ── Payment landing pages (mini app) ─────────────────────────────────────────
@@ -517,7 +519,7 @@ Escribe en un solo mensaje los datos bancarios (CLABE, banco, titular) y se los 
         ).catch(() => {});
 
         if (transfer.customerChatId) {
-            awaitingDelivery.set(chatId, { customerChatId: transfer.customerChatId, amount: transfer.amount });
+            awaitingDelivery.set(chatId, { customerChatId: transfer.customerChatId, description: transfer.description });
             setTimeout(() => awaitingDelivery.delete(chatId), 30 * 60 * 1000);
             await bot.sendMessage(chatId, '✏️ Escribe la cuenta a entregar (formato correo:contraseña).');
         } else {
@@ -607,7 +609,7 @@ bot.on('message', (msg) => {
             recordSale({ date: new Date().toISOString(), method: 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId });
 
             if (transfer.customerChatId) {
-                const formatted = msg.text ? formatDelivery(msg.text, transfer.amount) : null;
+                const formatted = msg.text ? formatDelivery(msg.text, transfer.description) : null;
                 const sendToCustomer = formatted
                     ? bot.sendMessage(transfer.customerChatId, formatted, { parse_mode: 'HTML' })
                     : bot.copyMessage(transfer.customerChatId, chatId, msg.message_id)
@@ -627,7 +629,7 @@ bot.on('message', (msg) => {
     const delivery = awaitingDelivery.get(chatId);
     if (delivery && !(msg.text && msg.text.startsWith('/'))) {
         awaitingDelivery.delete(chatId);
-        const formatted = msg.text ? formatDelivery(msg.text, delivery.amount) : null;
+        const formatted = msg.text ? formatDelivery(msg.text, delivery.description) : null;
         const sendToCustomer = formatted
             ? bot.sendMessage(delivery.customerChatId, formatted, { parse_mode: 'HTML' })
             : bot.copyMessage(delivery.customerChatId, chatId, msg.message_id)
@@ -677,12 +679,19 @@ bot.on('message', (msg) => {
     }
 
     if (customerChatId) {
+        const escBank = (s) => s.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+        const bankDetails = msg.text.split('\n').map(line => {
+            const trimmed = line.trim();
+            if (!trimmed) return '';
+            if (trimmed.includes(':')) return escBank(trimmed);
+            return `<code>${escBank(trimmed)}</code>`;
+        }).join('\n');
         bot.sendMessage(customerChatId,
 `🏧 <b>Datos para tu transferencia</b>
 ━━━━━━━━━━━━━━
 💰 $${parseFloat(amount).toFixed(2)} USD — ${description}
 
-${msg.text}
+${bankDetails}
 
 Envía tu comprobante aquí una vez hecho el pago.`,
             { parse_mode: 'HTML' }
