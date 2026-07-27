@@ -75,6 +75,7 @@ function savePending(amount, description, targetChatId, operatorChatId) {
 const awaitingBankDetails = new Map(); // chatId del operador -> { transferId, customerChatId, amount, description }
 const pendingTransfers    = new Map(); // transferId -> { customerChatId, amount, description, operatorChatId }
 const transferByCustomer  = new Map(); // customerChatId -> { transferId, operatorChatId }
+const awaitingDelivery    = new Map(); // chatId del operador -> { customerChatId }
 
 // ── Payment landing pages (mini app) ─────────────────────────────────────────
 const paymentLinks = new Map();
@@ -506,6 +507,11 @@ Escribe en un solo mensaje los datos bancarios (CLABE, banco, titular) y se los 
 
         if (transfer.customerChatId) {
             bot.sendMessage(transfer.customerChatId, '✅ ¡Pago confirmado! Gracias por tu compra 🎉').catch(() => {});
+            awaitingDelivery.set(chatId, { customerChatId: transfer.customerChatId });
+            setTimeout(() => awaitingDelivery.delete(chatId), 30 * 60 * 1000);
+            await bot.sendMessage(chatId, '✏️ Escribe ahora los datos de la cuenta/entrega y se los mando al cliente.');
+        } else {
+            await bot.sendMessage(chatId, 'ℹ️ No hay un chat de cliente vinculado — entrégale la cuenta manualmente.');
         }
         return;
     }
@@ -586,13 +592,24 @@ Escribe en un solo mensaje los datos bancarios (CLABE, banco, titular) y se los 
 bot.on('message', (msg) => {
     const chatId = msg.chat.id;
 
+    // Entrega de la cuenta/producto tras confirmar el pago -> copiar al cliente
+    const delivery = awaitingDelivery.get(chatId);
+    if (delivery && !(msg.text && msg.text.startsWith('/'))) {
+        awaitingDelivery.delete(chatId);
+        bot.copyMessage(delivery.customerChatId, chatId, msg.message_id)
+            .then(() => bot.sendMessage(chatId, '✅ Entregado al cliente.'))
+            .catch(() => bot.sendMessage(chatId, '⚠️ No se pudo entregar al cliente, envíaselo tú manualmente.'));
+        return;
+    }
+
     // Comprobante (foto/documento/texto) del cliente -> reenviar a quien debe confirmar
     const awaitingProof = transferByCustomer.get(chatId);
     if (awaitingProof && !(msg.text && msg.text.startsWith('/'))) {
-        bot.forwardMessage(awaitingProof.operatorChatId, chatId, msg.message_id).catch(() => {});
-        bot.sendMessage(awaitingProof.operatorChatId, '📎 Comprobante recibido del cliente (arriba 👆)', {
-            reply_markup: { inline_keyboard: [[{ text: '✅ Confirmar pago recibido', callback_data: `confirm_transfer_${awaitingProof.transferId}` }]] } }
-        ).catch(() => {});
+        bot.forwardMessage(awaitingProof.operatorChatId, chatId, msg.message_id)
+            .catch(() => {})
+            .then(() => bot.sendMessage(awaitingProof.operatorChatId, '📎 Comprobante recibido del cliente (arriba 👆)', {
+                reply_markup: { inline_keyboard: [[{ text: '✅ Confirmar pago recibido', callback_data: `confirm_transfer_${awaitingProof.transferId}` }]] }
+            }).catch(() => {}));
         return;
     }
 
