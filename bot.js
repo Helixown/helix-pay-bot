@@ -50,6 +50,15 @@ operadores.add(ADMIN_CHAT_ID);
 function saveOperadores() { fs.writeFileSync(OPERATORS_FILE, JSON.stringify([...operadores])); }
 function isAllowed(chatId) { return operadores.has(chatId); }
 
+// ── Clientes conocidos (para avisar al admin solo de clientes nuevos) ─────────
+const CUSTOMERS_FILE = process.env.CUSTOMERS_FILE || path.join(__dirname, 'customers.json');
+function loadCustomers() {
+    try { return new Set(JSON.parse(fs.readFileSync(CUSTOMERS_FILE, 'utf8'))); }
+    catch { return new Set(); }
+}
+const knownCustomers = loadCustomers();
+function saveCustomers() { fs.writeFileSync(CUSTOMERS_FILE, JSON.stringify([...knownCustomers])); }
+
 // ── Catálogo de productos ─────────────────────────────────────────────────────
 const PRODUCTS_FILE = process.env.PRODUCTS_FILE || path.join(__dirname, 'products.json');
 function loadCatalog() {
@@ -612,6 +621,13 @@ bot.onText(/\/start(?:\s+(\S+))?/, (msg, match) => {
     const payload = match[1];
 
     if (!isAllowed(chatId)) {
+        if (!knownCustomers.has(chatId)) {
+            knownCustomers.add(chatId);
+            saveCustomers();
+            const who = msg.from?.username ? '@' + msg.from.username : (msg.from?.first_name || 'Sin nombre');
+            bot.sendMessage(ADMIN_CHAT_ID, `🆕 <b>Nuevo cliente inició el bot</b>\n👤 ${who} (<code>${chatId}</code>)`, { parse_mode: 'HTML' }).catch(() => {});
+        }
+
         if (payload === 'tienda') return sendTienda(chatId);
         return bot.sendMessage(chatId,
 `👋 <b>¡Bienvenido a JH STORE!</b>
