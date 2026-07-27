@@ -87,11 +87,12 @@ function recordSale(sale) {
     fs.writeFileSync(SALES_FILE, JSON.stringify(sales, null, 2));
 }
 
-// ── Métodos de pago manuales (transferencia MXN, Binance ID, AirTM) ───────────
+// ── Métodos de pago manuales (transferencia MXN, Binance ID, AirTM, Remitly) ──
 const PAYMENT_METHODS = {
     mxn:     { label: '🏧 Transferencia MXN', title: 'Transferencia MXN', file: process.env.BANK_FILE    || path.join(__dirname, 'bank.json'),    mxn: true },
     binance: { label: '🟡 Binance ID',        title: 'Binance',           file: process.env.BINANCE_FILE || path.join(__dirname, 'binance.json'), mxn: false },
-    airtm:   { label: '🔵 AirTM',             title: 'AirTM',             file: process.env.AIRTM_FILE   || path.join(__dirname, 'airtm.json'),   mxn: false }
+    airtm:   { label: '🔵 AirTM',             title: 'AirTM',             file: process.env.AIRTM_FILE   || path.join(__dirname, 'airtm.json'),   mxn: false },
+    remitly: { label: '🟣 Remitly',           title: 'Remitly',           file: process.env.REMITLY_FILE || path.join(__dirname, 'remitly.json'), mxn: false }
 };
 
 function loadMethodDetails(key) {
@@ -184,7 +185,8 @@ function metodoPagoPanel(pendingId, amount, description, showCatalogoBack) {
     const keyboard = [
         row1,
         [{ text: '🏧 Transferencia MXN', callback_data: `pay_m_mxn_${pendingId}` }],
-        [{ text: '🟡 Binance ID', callback_data: `pay_m_binance_${pendingId}` }, { text: '🔵 AirTM', callback_data: `pay_m_airtm_${pendingId}` }]
+        [{ text: '🟡 Binance ID', callback_data: `pay_m_binance_${pendingId}` }, { text: '🔵 AirTM', callback_data: `pay_m_airtm_${pendingId}` }],
+        [{ text: '🟣 Remitly', callback_data: `pay_m_remitly_${pendingId}` }]
     ];
     if (showCatalogoBack) keyboard.push([{ text: '⬅️ Volver al catálogo', callback_data: 'back_tienda' }]);
     return { text: `💰 <b>$${parseFloat(amount).toFixed(2)} USD</b> — ${description}\nSelecciona método de pago:`, keyboard };
@@ -899,7 +901,7 @@ bot.on('callback_query', async (cq) => {
     }
 
     if (data.startsWith('pay_m_')) {
-        const match = data.match(/^pay_m_(mxn|binance|airtm)_(.+)$/);
+        const match = data.match(/^pay_m_(mxn|binance|airtm|remitly)_(.+)$/);
         if (!match) return bot.answerCallbackQuery(cq.id);
         const [, methodKey, pendingId] = match;
         const methodCfg = PAYMENT_METHODS[methodKey];
@@ -1131,27 +1133,29 @@ bot.on('message', async (msg) => {
         return;
     }
 
-    // Comprobante (foto/documento/texto) del cliente -> reenviar a quien debe confirmar
+    // Comprobante (foto/documento/texto) del cliente -> reenviar a TODOS los operadores para que cualquiera confirme y entregue
     const awaitingProof = transferByCustomer.get(chatId);
     if (awaitingProof && !(msg.text && msg.text.startsWith('/'))) {
-        bot.copyMessage(awaitingProof.operatorChatId, chatId, msg.message_id)
-            .then((sent) => {
-                transferMessages.set(`${awaitingProof.operatorChatId}:${sent.message_id}`, awaitingProof.transferId);
-                persistTransfersState();
-                setTimeout(() => { transferMessages.delete(`${awaitingProof.operatorChatId}:${sent.message_id}`); persistTransfersState(); }, 24 * 60 * 60 * 1000);
-                return bot.sendMessage(awaitingProof.operatorChatId,
-                    '📎 Comprobante recibido del cliente (arriba 👆). Responde a este mensaje con la cuenta para confirmar y entregársela junto con el agradecimiento, o usa el botón para solo confirmar.', {
-                        reply_markup: { inline_keyboard: [[{ text: '✅ Confirmar pago recibido', callback_data: `confirm_transfer_${awaitingProof.transferId}` }]] }
-                    });
-            })
-            .then((sent2) => {
-                if (sent2) {
-                    transferMessages.set(`${awaitingProof.operatorChatId}:${sent2.message_id}`, awaitingProof.transferId);
+        for (const opId of operadores) {
+            bot.copyMessage(opId, chatId, msg.message_id)
+                .then((sent) => {
+                    transferMessages.set(`${opId}:${sent.message_id}`, awaitingProof.transferId);
                     persistTransfersState();
-                    setTimeout(() => { transferMessages.delete(`${awaitingProof.operatorChatId}:${sent2.message_id}`); persistTransfersState(); }, 24 * 60 * 60 * 1000);
-                }
-            })
-            .catch(() => {});
+                    setTimeout(() => { transferMessages.delete(`${opId}:${sent.message_id}`); persistTransfersState(); }, 24 * 60 * 60 * 1000);
+                    return bot.sendMessage(opId,
+                        '📎 Comprobante recibido del cliente (arriba 👆). Responde a este mensaje con la cuenta para confirmar y entregársela junto con el agradecimiento, o usa el botón para solo confirmar.', {
+                            reply_markup: { inline_keyboard: [[{ text: '✅ Confirmar pago recibido', callback_data: `confirm_transfer_${awaitingProof.transferId}` }]] }
+                        });
+                })
+                .then((sent2) => {
+                    if (sent2) {
+                        transferMessages.set(`${opId}:${sent2.message_id}`, awaitingProof.transferId);
+                        persistTransfersState();
+                        setTimeout(() => { transferMessages.delete(`${opId}:${sent2.message_id}`); persistTransfersState(); }, 24 * 60 * 60 * 1000);
+                    }
+                })
+                .catch(() => {});
+        }
         return;
     }
 
