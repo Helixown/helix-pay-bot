@@ -23,6 +23,14 @@ const stripe = STRIPE_SECRET_KEY ? Stripe(STRIPE_SECRET_KEY) : null;
 
 bot.setMyCommands([{ command: 'start', description: 'Iniciar' }]).catch(() => {});
 
+let cachedBotUsername = null;
+async function getBotUsername() {
+    if (cachedBotUsername) return cachedBotUsername;
+    const me = await bot.getMe();
+    cachedBotUsername = me.username;
+    return cachedBotUsername;
+}
+
 // ── Operadores ────────────────────────────────────────────────────────────────
 const OPERATORS_FILE = process.env.OPERATORS_FILE || path.join(__dirname, 'operators.json');
 function loadOperadores() {
@@ -410,6 +418,25 @@ bot.onText(/\/tienda/, (msg) => {
     sendTienda(msg.chat.id);
 });
 
+bot.onText(/\/promocanal(?:\s+(\S+))?(?:\s+([\s\S]+))?/, async (msg, match) => {
+    if (!isAllowed(msg.chat.id)) return;
+    const target = match[1];
+    if (!target) {
+        return bot.sendMessage(msg.chat.id, '❌ Uso: /promocanal <@canal o chatId> [texto]\nEjemplo: /promocanal @jhstorecanal ¡Nuevos productos disponibles!');
+    }
+    const text = (match[2] || '').trim() || '🛒 Descubre nuestros productos y paga 100% seguro. Toca el botón para ir a la tienda.';
+
+    try {
+        const username = await getBotUsername();
+        await bot.sendMessage(target, text, {
+            reply_markup: { inline_keyboard: [[{ text: '🛒 Ir a la tienda', url: `https://t.me/${username}?start=tienda` }]] }
+        });
+        bot.sendMessage(msg.chat.id, '✅ Publicado en el canal.');
+    } catch (err) {
+        bot.sendMessage(msg.chat.id, `❌ No se pudo publicar: ${err.message}\nAsegúrate de que el bot sea admin del canal y que el @usuario/chatId sea correcto.`);
+    }
+});
+
 function ventasPanel() {
     if (!sales.length) return { text: '📊 Aún no hay ventas registradas.', keyboard: [] };
     const total = sales.reduce((sum, s) => sum + s.amount, 0);
@@ -495,6 +522,9 @@ ${stripe ? '✅' : '❌'} Stripe (tarjeta)
 /listproductos
 /delproducto <code>&lt;id&gt;</code>
 
+<b>Promoción:</b>
+/promocanal <code>&lt;@canal o chatId&gt; [texto]</code>
+
 <b>Ventas:</b>
 /ventas
 ${isAdmin ? `
@@ -536,10 +566,12 @@ bot.onText(/\/ventas/, (msg) => {
     sendVentas(msg.chat.id);
 });
 
-bot.onText(/\/start/, (msg) => {
-    const chatId = msg.chat.id;
+bot.onText(/\/start(?:\s+(\S+))?/, (msg, match) => {
+    const chatId  = msg.chat.id;
+    const payload = match[1];
 
     if (!isAllowed(chatId)) {
+        if (payload === 'tienda') return sendTienda(chatId);
         return bot.sendMessage(chatId,
 `👋 <b>¡Bienvenido a JH STORE!</b>
 ━━━━━━━━━━━━━━
