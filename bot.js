@@ -75,8 +75,18 @@ function savePending(amount, description, targetChatId, operatorChatId) {
 const awaitingBankDetails = new Map(); // chatId del operador -> { transferId, customerChatId, amount, description }
 const pendingTransfers    = new Map(); // transferId -> { customerChatId, amount, description, operatorChatId }
 const transferByCustomer  = new Map(); // customerChatId -> { transferId, operatorChatId }
-const awaitingDelivery    = new Map(); // chatId del operador -> { customerChatId }
+const awaitingDelivery    = new Map(); // chatId del operador -> { customerChatId, amount }
 const transferMessages    = new Map(); // `${operatorChatId}:${messageId}` -> transferId (para responder con reply y confirmar+entregar)
+
+// Si el texto es "correo:contraseña", arma el mensaje de entrega con el formato pedido (correo / contraseña / monto)
+function formatDelivery(text, amount) {
+    const sep = text.indexOf(':');
+    if (sep === -1) return null;
+    const email    = text.slice(0, sep).trim();
+    const password = text.slice(sep + 1).trim();
+    const esc = (s) => s.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+    return `🎉 <b>¡Gracias por tu compra!</b>\n\n<code>${esc(email)}</code>\n\n<code>${esc(password)}</code>\n\n${parseFloat(amount)}`;
+}
 
 // ── Payment landing pages (mini app) ─────────────────────────────────────────
 const paymentLinks = new Map();
@@ -507,10 +517,9 @@ Escribe en un solo mensaje los datos bancarios (CLABE, banco, titular) y se los 
         ).catch(() => {});
 
         if (transfer.customerChatId) {
-            bot.sendMessage(transfer.customerChatId, '✅ ¡Pago confirmado! Gracias por tu compra 🎉').catch(() => {});
-            awaitingDelivery.set(chatId, { customerChatId: transfer.customerChatId });
+            awaitingDelivery.set(chatId, { customerChatId: transfer.customerChatId, amount: transfer.amount });
             setTimeout(() => awaitingDelivery.delete(chatId), 30 * 60 * 1000);
-            await bot.sendMessage(chatId, '✏️ Escribe ahora los datos de la cuenta/entrega y se los mando al cliente.');
+            await bot.sendMessage(chatId, '✏️ Escribe la cuenta a entregar (formato correo:contraseña).');
         } else {
             await bot.sendMessage(chatId, 'ℹ️ No hay un chat de cliente vinculado — entrégale la cuenta manualmente.');
         }
@@ -598,8 +607,13 @@ bot.on('message', (msg) => {
             recordSale({ date: new Date().toISOString(), method: 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId });
 
             if (transfer.customerChatId) {
-                bot.copyMessage(transfer.customerChatId, chatId, msg.message_id)
-                    .then(() => bot.sendMessage(transfer.customerChatId, '✅ ¡Pago confirmado! Gracias por tu compra 🎉'))
+                const formatted = msg.text ? formatDelivery(msg.text, transfer.amount) : null;
+                const sendToCustomer = formatted
+                    ? bot.sendMessage(transfer.customerChatId, formatted, { parse_mode: 'HTML' })
+                    : bot.copyMessage(transfer.customerChatId, chatId, msg.message_id)
+                        .then(() => bot.sendMessage(transfer.customerChatId, '🎉 ¡Gracias por tu compra!'));
+
+                sendToCustomer
                     .then(() => bot.sendMessage(chatId, '✅ Confirmado y entregado al cliente.'))
                     .catch(() => bot.sendMessage(chatId, '⚠️ Pago confirmado, pero no se pudo entregar al cliente automáticamente.'));
             } else {
@@ -609,11 +623,17 @@ bot.on('message', (msg) => {
         }
     }
 
-    // Entrega de la cuenta/producto tras confirmar el pago -> copiar al cliente
+    // Entrega de la cuenta/producto tras confirmar el pago -> mandar al cliente
     const delivery = awaitingDelivery.get(chatId);
     if (delivery && !(msg.text && msg.text.startsWith('/'))) {
         awaitingDelivery.delete(chatId);
-        bot.copyMessage(delivery.customerChatId, chatId, msg.message_id)
+        const formatted = msg.text ? formatDelivery(msg.text, delivery.amount) : null;
+        const sendToCustomer = formatted
+            ? bot.sendMessage(delivery.customerChatId, formatted, { parse_mode: 'HTML' })
+            : bot.copyMessage(delivery.customerChatId, chatId, msg.message_id)
+                .then(() => bot.sendMessage(delivery.customerChatId, '🎉 ¡Gracias por tu compra!'));
+
+        sendToCustomer
             .then(() => bot.sendMessage(chatId, '✅ Entregado al cliente.'))
             .catch(() => bot.sendMessage(chatId, '⚠️ No se pudo entregar al cliente, envíaselo tú manualmente.'));
         return;
