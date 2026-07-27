@@ -55,6 +55,23 @@ function recordSale(sale) {
     fs.writeFileSync(SALES_FILE, JSON.stringify(sales, null, 2));
 }
 
+// ── Datos bancarios (transferencia MXN) ───────────────────────────────────────
+const BANK_FILE = process.env.BANK_FILE || path.join(__dirname, 'bank.json');
+function loadBankDetails() {
+    try { return JSON.parse(fs.readFileSync(BANK_FILE, 'utf8')).text || null; }
+    catch { return null; }
+}
+function saveBankDetails(text) { fs.writeFileSync(BANK_FILE, JSON.stringify({ text })); }
+function formatBankLines(text) {
+    const escBank = (s) => s.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+    return text.split('\n').map(line => {
+        const trimmed = line.trim();
+        if (!trimmed) return '';
+        if (trimmed.includes(':')) return escBank(trimmed);
+        return `<code>${escBank(trimmed)}</code>`;
+    }).join('\n');
+}
+
 // Descripción de cada checkout generado, para poder registrar la venta cuando llegue el webhook
 const checkoutMeta = new Map();
 function saveCheckoutMeta(txId, description) {
@@ -72,7 +89,7 @@ function savePending(amount, description, targetChatId, operatorChatId) {
 }
 
 // ── Transferencia MXN manual (in-memory) ─────────────────────────────────────
-const awaitingBankDetails = new Map(); // chatId del operador -> { transferId, customerChatId, amount, description }
+const awaitingBankUpdate  = new Set(); // chatId del operador que va a enviar el texto para actualizar los datos bancarios
 const pendingTransfers    = new Map(); // transferId -> { customerChatId, amount, description, operatorChatId }
 const transferByCustomer  = new Map(); // customerChatId -> { transferId, operatorChatId }
 const awaitingDelivery    = new Map(); // chatId del operador -> { customerChatId, description }
@@ -290,6 +307,26 @@ bot.onText(/\/operadores/, (msg) => {
     bot.sendMessage(msg.chat.id, `👥 <b>Operadores activos:</b>\n${lista}`, { parse_mode: 'HTML' });
 });
 
+bot.onText(/\/datosbancarios(?:\s+([\s\S]+))?/, (msg, match) => {
+    if (!isAllowed(msg.chat.id)) return;
+    const chatId = msg.chat.id;
+    const inline = match[1] ? match[1].trim() : null;
+
+    if (inline) {
+        saveBankDetails(inline);
+        return bot.sendMessage(chatId, `✅ Datos bancarios actualizados.\n\n${formatBankLines(inline)}`, { parse_mode: 'HTML' });
+    }
+
+    const current = loadBankDetails();
+    awaitingBankUpdate.add(chatId);
+    setTimeout(() => awaitingBankUpdate.delete(chatId), 30 * 60 * 1000);
+    bot.sendMessage(chatId,
+        (current ? `🏦 <b>Datos bancarios actuales:</b>\n\n${formatBankLines(current)}\n\n` : '🏦 Aún no hay datos bancarios configurados.\n\n') +
+        'Envía en un solo mensaje los nuevos datos (CLABE, banco, titular) para actualizarlos.',
+        { parse_mode: 'HTML' }
+    );
+});
+
 bot.onText(/\/addproducto(?:\s+(.+))?/, (msg, match) => {
     if (!isAllowed(msg.chat.id)) return;
     const args  = (match[1] || '').trim().split(/\s+/);
@@ -345,16 +382,125 @@ bot.onText(/\/tienda/, (msg) => {
     sendTienda(msg.chat.id);
 });
 
-function sendVentas(chatId) {
-    if (!sales.length) return bot.sendMessage(chatId, '📊 Aún no hay ventas registradas.');
+function ventasPanel() {
+    if (!sales.length) return { text: '📊 Aún no hay ventas registradas.', keyboard: [] };
     const total = sales.reduce((sum, s) => sum + s.amount, 0);
-    bot.sendMessage(chatId,
+    const text =
 `📊 <b>Ventas</b>
 ━━━━━━━━━━━━━━
 🧾 Vendidas: <b>${sales.length}</b>
-💰 Total generado: <b>$${total.toFixed(2)} USD</b>`,
-        { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🗑️ Reiniciar contador', callback_data: 'reset_ventas_ask' }]] } }
-    );
+💰 Total generado: <b>$${total.toFixed(2)} USD</b>`;
+    return { text, keyboard: [[{ text: '🗑️ Reiniciar contador', callback_data: 'reset_ventas_ask' }]] };
+}
+
+function sendVentas(chatId) {
+    const panel = ventasPanel();
+    bot.sendMessage(chatId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
+}
+
+// ── Panel de operador ─────────────────────────────────────────────────────────
+function catalogoAdminPanel() {
+    const ids = Object.keys(catalog.items);
+    const lista = ids.length
+        ? ids.map(id => `• <code>${id}</code> — ${catalog.items[id].name} — $${catalog.items[id].price.toFixed(2)}`).join('\n')
+        : 'Catálogo vacío.';
+    const text =
+`🛒 <b>Catálogo</b>
+━━━━━━━━━━━━━━
+${lista}
+
+<b>Comandos:</b>
+/addproducto <code>&lt;precio&gt; &lt;nombre&gt;</code>
+/delproducto <code>&lt;id&gt;</code>
+/tienda — vista del cliente`;
+    return { text, keyboard: [] };
+}
+
+function cobrarPanel() {
+    const text =
+`💰 <b>Cobrar</b>
+━━━━━━━━━━━━━━
+/cobrar <code>&lt;monto&gt; [descripción] [chatId]</code>
+
+<b>Ejemplos:</b>
+<code>/cobrar 50</code>
+<code>/cobrar 50 10 cuentas premium</code>
+<code>/cobrar 50 10 cuentas 123456789</code>`;
+    return { text, keyboard: [] };
+}
+
+function bancoPanel() {
+    const current = loadBankDetails();
+    const text = current
+        ? `🏧 <b>Datos bancarios (transferencia MXN)</b>\n━━━━━━━━━━━━━━\n${formatBankLines(current)}`
+        : '🏧 <b>Datos bancarios (transferencia MXN)</b>\n━━━━━━━━━━━━━━\n⚠️ Aún no configurados.';
+    return { text, keyboard: [[{ text: '✏️ Actualizar', callback_data: 'panel_banco_edit' }]] };
+}
+
+function operadoresPanel() {
+    const lista = [...operadores].map(id => `• <code>${id}</code>${id === ADMIN_CHAT_ID ? ' (admin)' : ''}`).join('\n');
+    const text =
+`👥 <b>Operadores</b>
+━━━━━━━━━━━━━━
+${lista}
+
+<b>Comandos:</b>
+/addoperador <code>&lt;chatId&gt;</code>
+/removeoperador <code>&lt;chatId&gt;</code>`;
+    return { text, keyboard: [] };
+}
+
+function comandosPanel(isAdmin) {
+    const text =
+`📖 <b>Todos los comandos</b>
+━━━━━━━━━━━━━━
+${stripe ? '✅' : '❌'} Stripe (tarjeta)
+
+<b>Cobros:</b>
+/cobrar <code>&lt;monto&gt; [descripción] [chatId]</code>
+
+<b>Transferencia MXN:</b>
+/datosbancarios <code>[CLABE / banco / titular]</code>
+
+<b>Catálogo (tienda pública /tienda):</b>
+/addproducto <code>&lt;precio&gt; &lt;nombre&gt;</code>
+/listproductos
+/delproducto <code>&lt;id&gt;</code>
+
+<b>Ventas:</b>
+/ventas
+${isAdmin ? `
+<b>Operadores:</b>
+/addoperador <code>&lt;chatId&gt;</code>
+/removeoperador <code>&lt;chatId&gt;</code>
+/operadores` : ''}`;
+    return { text, keyboard: [] };
+}
+
+function operatorHomePanel(isAdmin) {
+    const text =
+`💳 <b>Pay Bot</b> — Panel de operador
+━━━━━━━━━━━━━━
+${stripe ? '✅' : '❌'} Stripe (tarjeta)
+
+Elige una opción:`;
+    const keyboard = [
+        [{ text: '🛒 Catálogo', callback_data: 'panel_catalogo' }, { text: '📊 Ventas', callback_data: 'panel_ventas' }],
+        [{ text: '💰 Cobrar', callback_data: 'panel_cobrar' }, { text: '🏧 Datos bancarios', callback_data: 'panel_banco' }]
+    ];
+    if (isAdmin) keyboard.push([{ text: '👥 Operadores', callback_data: 'panel_operadores' }]);
+    keyboard.push([{ text: '📖 Todos los comandos', callback_data: 'panel_comandos' }]);
+    return { text, keyboard };
+}
+
+function withBack(keyboard) {
+    return [...keyboard, [{ text: '⬅️ Menú', callback_data: 'panel_home' }]];
+}
+
+function editPanel(chatId, messageId, panel) {
+    const keyboard = withBack(panel.keyboard);
+    return bot.editMessageText(panel.text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } })
+        .catch(() => bot.sendMessage(chatId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } }));
 }
 
 bot.onText(/\/ventas/, (msg) => {
@@ -376,37 +522,9 @@ Toca el botón de abajo para ver el catálogo.`,
         );
     }
 
-    const hasStripe = !!stripe;
     const isAdmin = msg.chat.id === ADMIN_CHAT_ID;
-    bot.sendMessage(msg.chat.id,
-`💳 <b>Pay Bot</b>
-━━━━━━━━━━━━━━
-<b>Métodos activos:</b>
-${hasStripe ? '✅' : '❌'} Stripe (tarjeta)
-
-<b>Cobros:</b>
-/cobrar <code>&lt;monto&gt; [descripción] [chatId]</code>
-
-<b>Catálogo (tienda pública /tienda):</b>
-/addproducto <code>&lt;precio&gt; &lt;nombre&gt;</code>
-/listproductos
-/delproducto <code>&lt;id&gt;</code>
-
-<b>Ventas:</b>
-/ventas
-${isAdmin ? `
-<b>Operadores:</b>
-/addoperador <code>&lt;chatId&gt;</code>
-/removeoperador <code>&lt;chatId&gt;</code>
-/operadores` : ''}
-
-<b>Ejemplos:</b>
-<code>/cobrar 50</code>
-<code>/cobrar 50 10 cuentas premium</code>
-<code>/cobrar 50 10 cuentas 123456789</code>
-<code>/addproducto 15 Cuenta Premium 1 mes</code>`,
-        { parse_mode: 'HTML' }
-    );
+    const panel = operatorHomePanel(isAdmin);
+    bot.sendMessage(msg.chat.id, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
 });
 
 bot.onText(/\/cobrar(?:\s+(.+))?/, async (msg, match) => {
@@ -456,6 +574,60 @@ bot.on('callback_query', async (cq) => {
         return editTienda(chatId, cq.message.message_id);
     }
 
+    if (data === 'panel_home') {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        bot.answerCallbackQuery(cq.id);
+        const panel = operatorHomePanel(chatId === ADMIN_CHAT_ID);
+        return bot.editMessageText(panel.text, { chat_id: chatId, message_id: cq.message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } })
+            .catch(() => bot.sendMessage(chatId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } }));
+    }
+
+    if (data === 'panel_catalogo') {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        bot.answerCallbackQuery(cq.id);
+        return editPanel(chatId, cq.message.message_id, catalogoAdminPanel());
+    }
+
+    if (data === 'panel_ventas') {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        bot.answerCallbackQuery(cq.id);
+        return editPanel(chatId, cq.message.message_id, ventasPanel());
+    }
+
+    if (data === 'panel_cobrar') {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        bot.answerCallbackQuery(cq.id);
+        return editPanel(chatId, cq.message.message_id, cobrarPanel());
+    }
+
+    if (data === 'panel_banco') {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        bot.answerCallbackQuery(cq.id);
+        return editPanel(chatId, cq.message.message_id, bancoPanel());
+    }
+
+    if (data === 'panel_banco_edit') {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        bot.answerCallbackQuery(cq.id);
+        awaitingBankUpdate.add(chatId);
+        setTimeout(() => awaitingBankUpdate.delete(chatId), 30 * 60 * 1000);
+        return bot.editMessageText('✏️ Envía en un solo mensaje los nuevos datos bancarios (CLABE, banco, titular).',
+            { chat_id: chatId, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
+        ).catch(() => {});
+    }
+
+    if (data === 'panel_operadores') {
+        if (chatId !== ADMIN_CHAT_ID) return bot.answerCallbackQuery(cq.id);
+        bot.answerCallbackQuery(cq.id);
+        return editPanel(chatId, cq.message.message_id, operadoresPanel());
+    }
+
+    if (data === 'panel_comandos') {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        bot.answerCallbackQuery(cq.id);
+        return editPanel(chatId, cq.message.message_id, comandosPanel(chatId === ADMIN_CHAT_ID));
+    }
+
     if (data === 'reset_ventas_ask') {
         if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
         bot.answerCallbackQuery(cq.id);
@@ -472,12 +644,16 @@ bot.on('callback_query', async (cq) => {
         sales.length = 0;
         fs.writeFileSync(SALES_FILE, JSON.stringify(sales, null, 2));
         bot.answerCallbackQuery(cq.id, { text: '✅ Contador reiniciado.' });
-        return bot.editMessageText('✅ Contador de ventas reiniciado a 0.', { chat_id: chatId, message_id: cq.message.message_id });
+        return bot.editMessageText('✅ Contador de ventas reiniciado a 0.',
+            { chat_id: chatId, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
+        );
     }
 
     if (data === 'reset_ventas_cancel') {
         bot.answerCallbackQuery(cq.id, { text: 'Cancelado.' });
-        return bot.editMessageText('❌ Reinicio cancelado, el contador sigue igual.', { chat_id: chatId, message_id: cq.message.message_id });
+        return bot.editMessageText('❌ Reinicio cancelado, el contador sigue igual.',
+            { chat_id: chatId, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
+        );
     }
 
     if (data.startsWith('buy_')) {
@@ -507,35 +683,50 @@ bot.on('callback_query', async (cq) => {
             return bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: cq.message.message_id }).catch(() => {});
         }
 
-        bot.answerCallbackQuery(cq.id);
-
         const { amount, description, targetChatId, operatorChatId } = pending;
         const replyChatId    = operatorChatId || ADMIN_CHAT_ID;
         const fromOperator    = isAllowed(replyChatId);
         const customerChatId  = fromOperator ? targetChatId : replyChatId;
         const askChatId       = fromOperator ? replyChatId : ADMIN_CHAT_ID;
-        const transferId       = crypto.randomBytes(4).toString('hex');
 
-        awaitingBankDetails.set(askChatId, { transferId, customerChatId, amount, description });
-        setTimeout(() => awaitingBankDetails.delete(askChatId), 30 * 60 * 1000);
-
-        const askText =
-`🏧 <b>Transferencia MXN solicitada</b>
-━━━━━━━━━━━━━━
-💰 $${parseFloat(amount).toFixed(2)} USD — ${description}
-
-Escribe en un solo mensaje los datos bancarios (CLABE, banco, titular) y se los reenvío al cliente.`;
-        const waitingText = '⏳ En un momento te enviamos los datos para hacer tu transferencia.';
-
-        if (chatId === askChatId) {
-            await bot.editMessageText(askText, { chat_id: chatId, message_id: cq.message.message_id, parse_mode: 'HTML' }).catch(() => {});
-        } else {
-            await bot.editMessageText(waitingText, { chat_id: chatId, message_id: cq.message.message_id }).catch(() => {});
-            await bot.sendMessage(askChatId, askText, { parse_mode: 'HTML' });
+        const bankText = loadBankDetails();
+        if (!bankText) {
+            bot.answerCallbackQuery(cq.id, { text: '❌ Datos bancarios no configurados.' });
+            await bot.sendMessage(askChatId, '⚠️ Un cliente quiere pagar por transferencia MXN pero no hay datos bancarios configurados. Usa /datosbancarios para configurarlos.').catch(() => {});
+            return;
         }
 
-        if (customerChatId && customerChatId !== chatId) {
-            await bot.sendMessage(customerChatId, waitingText).catch(() => {});
+        bot.answerCallbackQuery(cq.id);
+
+        const transferId = crypto.randomBytes(4).toString('hex');
+        pendingTransfers.set(transferId, { customerChatId, amount, description, operatorChatId: askChatId });
+        setTimeout(() => pendingTransfers.delete(transferId), 24 * 60 * 60 * 1000);
+        if (customerChatId) {
+            transferByCustomer.set(customerChatId, { transferId, operatorChatId: askChatId });
+            setTimeout(() => transferByCustomer.delete(customerChatId), 24 * 60 * 60 * 1000);
+        }
+
+        const mxnRate   = await getMxnRate();
+        const mxnAmount = (parseFloat(amount) * mxnRate).toFixed(2);
+        const bankMsg =
+`🏧 <b>Datos para tu transferencia</b>
+━━━━━━━━━━━━━━
+💰 $${parseFloat(amount).toFixed(2)} USD ≈ <b>$${mxnAmount} MXN</b> — ${description}
+
+${formatBankLines(bankText)}
+
+Envía la foto de tu comprobante aquí una vez hecho el pago.`;
+
+        if (chatId === customerChatId) {
+            await bot.editMessageText(bankMsg, { chat_id: chatId, message_id: cq.message.message_id, parse_mode: 'HTML' })
+                .catch(() => bot.sendMessage(chatId, bankMsg, { parse_mode: 'HTML' }));
+        } else {
+            await bot.editMessageText('✅ Datos bancarios enviados al cliente. Te aviso cuando mande el comprobante.', { chat_id: chatId, message_id: cq.message.message_id }).catch(() => {});
+            if (customerChatId) await bot.sendMessage(customerChatId, bankMsg, { parse_mode: 'HTML' }).catch(() => {});
+        }
+
+        if (askChatId !== chatId && askChatId !== customerChatId) {
+            await bot.sendMessage(askChatId, `🏧 Transferencia MXN solicitada — $${parseFloat(amount).toFixed(2)} USD — ${description}.\nDatos enviados al cliente, te aviso cuando llegue el comprobante.`).catch(() => {});
         }
         return;
     }
@@ -702,42 +893,13 @@ bot.on('message', async (msg) => {
 
     if (!msg.text || msg.text.startsWith('/')) return;
 
-    const waiting = awaitingBankDetails.get(chatId);
-    if (!waiting) return;
-    awaitingBankDetails.delete(chatId);
-
-    const { transferId, customerChatId, amount, description } = waiting;
-    pendingTransfers.set(transferId, { customerChatId, amount, description, operatorChatId: chatId });
-    setTimeout(() => pendingTransfers.delete(transferId), 24 * 60 * 60 * 1000);
-
-    if (customerChatId) {
-        transferByCustomer.set(customerChatId, { transferId, operatorChatId: chatId });
-        setTimeout(() => transferByCustomer.delete(customerChatId), 24 * 60 * 60 * 1000);
+    // Texto para actualizar los datos bancarios por defecto (tras /datosbancarios)
+    if (awaitingBankUpdate.has(chatId)) {
+        awaitingBankUpdate.delete(chatId);
+        saveBankDetails(msg.text);
+        bot.sendMessage(chatId, `✅ Datos bancarios actualizados.\n\n${formatBankLines(msg.text)}`, { parse_mode: 'HTML' });
+        return;
     }
-
-    if (customerChatId) {
-        const escBank = (s) => s.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
-        const bankDetails = msg.text.split('\n').map(line => {
-            const trimmed = line.trim();
-            if (!trimmed) return '';
-            if (trimmed.includes(':')) return escBank(trimmed);
-            return `<code>${escBank(trimmed)}</code>`;
-        }).join('\n');
-        const mxnRate   = await getMxnRate();
-        const mxnAmount = (parseFloat(amount) * mxnRate).toFixed(2);
-        bot.sendMessage(customerChatId,
-`🏧 <b>Datos para tu transferencia</b>
-━━━━━━━━━━━━━━
-💰 $${parseFloat(amount).toFixed(2)} USD ≈ <b>$${mxnAmount} MXN</b> — ${description}
-
-${bankDetails}
-
-Envía la foto de tu comprobante aquí una vez hecho el pago.`,
-            { parse_mode: 'HTML' }
-        ).catch(() => {});
-    }
-
-    bot.sendMessage(chatId, '✅ Datos enviados al cliente. Te aviso cuando mande el comprobante.');
 });
 
 // ── Webhook Paddle ────────────────────────────────────────────────────────────
