@@ -1066,16 +1066,21 @@ bot.on('message', async (msg) => {
 // ── Webhook Paddle ────────────────────────────────────────────────────────────
 app.use('/webhook/paddle', express.raw({ type: 'application/json' }));
 app.post('/webhook/paddle', (req, res) => {
+    console.log('[webhook/paddle] recibido');
     if (PADDLE_WEBHOOK_SECRET) {
         const sig = req.headers['paddle-signature'] || '';
         const [tsPart, h1Part] = sig.split(';');
         const ts = tsPart?.replace('ts=', '');
         const h1 = h1Part?.replace('h1=', '');
         const expected = crypto.createHmac('sha256', PADDLE_WEBHOOK_SECRET).update(`${ts}:${req.body}`).digest('hex');
-        if (expected !== h1) return res.status(401).send('Invalid signature');
+        if (expected !== h1) {
+            console.log('[webhook/paddle] firma invalida');
+            return res.status(401).send('Invalid signature');
+        }
     }
     let event;
     try { event = JSON.parse(req.body); } catch { return res.status(400).send('Bad JSON'); }
+    console.log(`[webhook/paddle] event_type=${event.event_type}`);
 
     if (event.event_type === 'transaction.completed') {
         const tx          = event.data;
@@ -1105,17 +1110,20 @@ app.post('/webhook/paddle', (req, res) => {
 // ── Webhook Stripe ────────────────────────────────────────────────────────────
 app.use('/webhook/stripe', express.raw({ type: 'application/json' }));
 app.post('/webhook/stripe', (req, res) => {
+    console.log('[webhook/stripe] recibido');
     if (!stripe) return res.status(400).send('Stripe not configured');
     let event;
     if (STRIPE_WEBHOOK_SECRET) {
         try {
             event = stripe.webhooks.constructEvent(req.body, req.headers['stripe-signature'], STRIPE_WEBHOOK_SECRET);
         } catch (err) {
+            console.log(`[webhook/stripe] firma invalida: ${err.message}`);
             return res.status(400).send(`Webhook Error: ${err.message}`);
         }
     } else {
         try { event = JSON.parse(req.body); } catch { return res.status(400).send('Bad JSON'); }
     }
+    console.log(`[webhook/stripe] type=${event.type}`);
 
     if (event.type === 'checkout.session.completed') {
         const session     = event.data.object;
