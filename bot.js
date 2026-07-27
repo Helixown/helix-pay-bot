@@ -73,7 +73,8 @@ function savePending(amount, description, targetChatId, operatorChatId) {
 
 // ── Transferencia MXN manual (in-memory) ─────────────────────────────────────
 const awaitingBankDetails = new Map(); // chatId del operador -> { transferId, customerChatId, amount, description }
-const pendingTransfers    = new Map(); // transferId -> { customerChatId, amount, description }
+const pendingTransfers    = new Map(); // transferId -> { customerChatId, amount, description, operatorChatId }
+const transferByCustomer  = new Map(); // customerChatId -> { transferId, operatorChatId }
 
 // ── Payment landing pages (mini app) ─────────────────────────────────────────
 const paymentLinks = new Map();
@@ -494,6 +495,7 @@ Escribe en un solo mensaje los datos bancarios (CLABE, banco, titular) y se los 
         if (!transfer) return bot.answerCallbackQuery(cq.id, { text: '❌ Ya no disponible.' });
 
         pendingTransfers.delete(transferId);
+        if (transfer.customerChatId) transferByCustomer.delete(transfer.customerChatId);
         recordSale({ date: new Date().toISOString(), method: 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId });
 
         bot.answerCallbackQuery(cq.id, { text: '✅ Venta confirmada.' });
@@ -583,6 +585,17 @@ Escribe en un solo mensaje los datos bancarios (CLABE, banco, titular) y se los 
 // ── Captura de datos bancarios (transferencia MXN) ────────────────────────────
 bot.on('message', (msg) => {
     const chatId = msg.chat.id;
+
+    // Comprobante (foto/documento/texto) del cliente -> reenviar a quien debe confirmar
+    const awaitingProof = transferByCustomer.get(chatId);
+    if (awaitingProof && !(msg.text && msg.text.startsWith('/'))) {
+        bot.forwardMessage(awaitingProof.operatorChatId, chatId, msg.message_id).catch(() => {});
+        bot.sendMessage(awaitingProof.operatorChatId,
+            '📎 Comprobante recibido del cliente (arriba 👆). Si ya verificaste el pago, toca "✅ Confirmar pago recibido".'
+        ).catch(() => {});
+        return;
+    }
+
     if (!msg.text || msg.text.startsWith('/')) return;
 
     const waiting = awaitingBankDetails.get(chatId);
@@ -590,8 +603,13 @@ bot.on('message', (msg) => {
     awaitingBankDetails.delete(chatId);
 
     const { transferId, customerChatId, amount, description } = waiting;
-    pendingTransfers.set(transferId, { customerChatId, amount, description });
+    pendingTransfers.set(transferId, { customerChatId, amount, description, operatorChatId: chatId });
     setTimeout(() => pendingTransfers.delete(transferId), 24 * 60 * 60 * 1000);
+
+    if (customerChatId) {
+        transferByCustomer.set(customerChatId, { transferId, operatorChatId: chatId });
+        setTimeout(() => transferByCustomer.delete(customerChatId), 24 * 60 * 60 * 1000);
+    }
 
     const confirmButton = { inline_keyboard: [[{ text: '✅ Confirmar pago recibido', callback_data: `confirm_transfer_${transferId}` }]] };
 
