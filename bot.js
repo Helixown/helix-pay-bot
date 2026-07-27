@@ -87,28 +87,57 @@ function recordSale(sale) {
     fs.writeFileSync(SALES_FILE, JSON.stringify(sales, null, 2));
 }
 
-// ── Datos bancarios (transferencia MXN) ───────────────────────────────────────
-const BANK_FILE = process.env.BANK_FILE || path.join(__dirname, 'bank.json');
-function loadBankDetails() {
-    try { return JSON.parse(fs.readFileSync(BANK_FILE, 'utf8')).text || null; }
+// ── Métodos de pago manuales (transferencia MXN, Binance ID, AirTM) ───────────
+const PAYMENT_METHODS = {
+    mxn:     { label: '🏧 Transferencia MXN', title: 'Transferencia MXN', file: process.env.BANK_FILE    || path.join(__dirname, 'bank.json'),    mxn: true },
+    binance: { label: '🟡 Binance ID',        title: 'Binance',           file: process.env.BINANCE_FILE || path.join(__dirname, 'binance.json'), mxn: false },
+    airtm:   { label: '🔵 AirTM',             title: 'AirTM',             file: process.env.AIRTM_FILE   || path.join(__dirname, 'airtm.json'),   mxn: false }
+};
+
+function loadMethodDetails(key) {
+    try { return JSON.parse(fs.readFileSync(PAYMENT_METHODS[key].file, 'utf8')).text || null; }
     catch { return null; }
 }
-function saveBankDetails(text) { fs.writeFileSync(BANK_FILE, JSON.stringify({ text })); }
-function formatBankLines(text) {
-    const escBank = (s) => s.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+function saveMethodDetails(key, text) { fs.writeFileSync(PAYMENT_METHODS[key].file, JSON.stringify({ text })); }
+function formatDetailLines(text) {
+    const esc = (s) => s.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
     return text.split('\n').map(line => {
         const trimmed = line.trim();
         if (!trimmed) return '';
-        if (trimmed.includes(':')) return escBank(trimmed);
-        return `<code>${escBank(trimmed)}</code>`;
+        if (trimmed.includes(':')) return esc(trimmed);
+        return `<code>${esc(trimmed)}</code>`;
     }).join('\n');
 }
 
-// Descripción de cada checkout generado, para poder registrar la venta cuando llegue el webhook
-const checkoutMeta = new Map();
+// Metadatos de cada checkout generado (a qué cliente/operador entregar cuando llegue el webhook)
+// Persistido en disco para sobrevivir a reinicios entre que el cliente paga y el webhook confirma
+const CHECKOUT_META_FILE = process.env.CHECKOUT_META_FILE || path.join(__dirname, 'checkout_meta.json');
+const CHECKOUT_META_TTL_MS = 24 * 60 * 60 * 1000;
+
+function loadCheckoutMeta() {
+    let raw;
+    try { raw = JSON.parse(fs.readFileSync(CHECKOUT_META_FILE, 'utf8')); }
+    catch { return new Map(); }
+    const map = new Map();
+    const now = Date.now();
+    for (const [txId, entry] of Object.entries(raw)) {
+        if (entry.createdAt && now - entry.createdAt < CHECKOUT_META_TTL_MS) map.set(txId, entry);
+    }
+    return map;
+}
+const checkoutMeta = loadCheckoutMeta();
+function persistCheckoutMeta() { fs.writeFileSync(CHECKOUT_META_FILE, JSON.stringify(Object.fromEntries(checkoutMeta))); }
+
 function saveCheckoutMeta(txId, meta) {
-    checkoutMeta.set(txId, meta);
-    setTimeout(() => checkoutMeta.delete(txId), 24 * 60 * 60 * 1000);
+    checkoutMeta.set(txId, { ...meta, createdAt: Date.now() });
+    persistCheckoutMeta();
+    setTimeout(() => { checkoutMeta.delete(txId); persistCheckoutMeta(); }, CHECKOUT_META_TTL_MS);
+}
+
+// Reprograma el borrado de lo que ya estaba en disco al arrancar
+for (const [txId, entry] of checkoutMeta) {
+    const remaining = CHECKOUT_META_TTL_MS - (Date.now() - entry.createdAt);
+    setTimeout(() => { checkoutMeta.delete(txId); persistCheckoutMeta(); }, Math.max(remaining, 0));
 }
 
 // Aviso de pago confirmado: al admin con detalle completo, a los demás operadores sin el correo del cliente
@@ -120,13 +149,22 @@ function notifyPaymentReceived(adminText, operatorText) {
     }
 }
 
+// Avisa a todos los operadores (menos los excluidos), para que cualquiera pueda cubrir una transferencia MXN
+function notifyAllOperators(text, options = {}, exclude = []) {
+    for (const opId of operadores) {
+        if (exclude.includes(opId)) continue;
+        bot.sendMessage(opId, text, options).catch(() => {});
+    }
+}
+
 // Tras confirmarse un pago (Stripe/Paddle), pide la cuenta a entregar igual que en transferencia MXN
 function triggerDelivery(txId, description) {
     const meta = checkoutMeta.get(txId);
     if (!meta || !meta.customerChatId) return;
     const { customerChatId, askChatId } = meta;
     awaitingDelivery.set(askChatId, { customerChatId, description });
-    setTimeout(() => awaitingDelivery.delete(askChatId), 30 * 60 * 1000);
+    persistTransfersState();
+    setTimeout(() => { awaitingDelivery.delete(askChatId); persistTransfersState(); }, 30 * 60 * 1000);
     bot.sendMessage(askChatId, '✏️ Pago confirmado — escribe la cuenta a entregar (formato correo:contraseña).').catch(() => {});
 }
 
@@ -143,19 +181,49 @@ function metodoPagoPanel(pendingId, amount, description, showCatalogoBack) {
     const row1 = [];
     if (stripe) row1.push({ text: '💳 Tarjeta (Stripe)', callback_data: `pay_s_${pendingId}` });
     row1.push({ text: '🏦 PayPal (Paddle)', callback_data: `pay_p_${pendingId}` });
-    const keyboard = [row1, [{ text: '🏧 Transferencia MXN', callback_data: `pay_t_${pendingId}` }]];
+    const keyboard = [
+        row1,
+        [{ text: '🏧 Transferencia MXN', callback_data: `pay_m_mxn_${pendingId}` }],
+        [{ text: '🟡 Binance ID', callback_data: `pay_m_binance_${pendingId}` }, { text: '🔵 AirTM', callback_data: `pay_m_airtm_${pendingId}` }]
+    ];
     if (showCatalogoBack) keyboard.push([{ text: '⬅️ Volver al catálogo', callback_data: 'back_tienda' }]);
     return { text: `💰 <b>$${parseFloat(amount).toFixed(2)} USD</b> — ${description}\nSelecciona método de pago:`, keyboard };
 }
 
 const awaitingCanalPost = new Map(); // chatId del operador -> message_id del panel a editar, mientras espera el texto para el canal
 
-// ── Transferencia MXN manual (in-memory) ─────────────────────────────────────
-const awaitingBankUpdate  = new Map(); // chatId del operador -> message_id del panel a borrar cuando llegue el texto para actualizar los datos bancarios
-const pendingTransfers    = new Map(); // transferId -> { customerChatId, amount, description, operatorChatId }
-const transferByCustomer  = new Map(); // customerChatId -> { transferId, operatorChatId }
-const awaitingDelivery    = new Map(); // chatId del operador -> { customerChatId, description }
-const transferMessages    = new Map(); // `${operatorChatId}:${messageId}` -> transferId (para responder con reply y confirmar+entregar)
+// ── Transferencias manuales (MXN, Binance, AirTM) ─────────────────────────────
+// Persistido en disco para sobrevivir a reinicios entre que se manda el cobro y se confirma/entrega
+const awaitingMethodUpdate = new Map(); // chatId del operador -> { key, messageId } mientras espera el texto para actualizar un método de pago
+
+const TRANSFERS_FILE = process.env.TRANSFERS_FILE || path.join(__dirname, 'transfers.json');
+function loadTransfersState() {
+    try {
+        const raw = JSON.parse(fs.readFileSync(TRANSFERS_FILE, 'utf8'));
+        return {
+            pendingTransfers:   new Map(Object.entries(raw.pendingTransfers || {})),
+            transferByCustomer: new Map(Object.entries(raw.transferByCustomer || {}).map(([k, v]) => [Number(k), v])),
+            awaitingDelivery:   new Map(Object.entries(raw.awaitingDelivery || {}).map(([k, v]) => [Number(k), v])),
+            transferMessages:   new Map(Object.entries(raw.transferMessages || {}))
+        };
+    } catch {
+        return { pendingTransfers: new Map(), transferByCustomer: new Map(), awaitingDelivery: new Map(), transferMessages: new Map() };
+    }
+}
+const _transfersState    = loadTransfersState();
+const pendingTransfers   = _transfersState.pendingTransfers;   // transferId -> { customerChatId, amount, description, operatorChatId }
+const transferByCustomer = _transfersState.transferByCustomer; // customerChatId -> { transferId, operatorChatId }
+const awaitingDelivery   = _transfersState.awaitingDelivery;   // chatId del operador -> { customerChatId, description }
+const transferMessages   = _transfersState.transferMessages;   // `${operatorChatId}:${messageId}` -> transferId (para responder con reply y confirmar+entregar)
+
+function persistTransfersState() {
+    fs.writeFileSync(TRANSFERS_FILE, JSON.stringify({
+        pendingTransfers:   Object.fromEntries(pendingTransfers),
+        transferByCustomer: Object.fromEntries(transferByCustomer),
+        awaitingDelivery:   Object.fromEntries(awaitingDelivery),
+        transferMessages:   Object.fromEntries(transferMessages)
+    }));
+}
 
 // Si el texto es "correo:contraseña", arma el mensaje de entrega con el formato pedido (correo / contraseña / número de la descripción, ej. "Cuenta de 200" -> 200)
 function formatDelivery(text, description) {
@@ -375,18 +443,18 @@ bot.onText(/\/datosbancarios(?:\s+([\s\S]+))?/, async (msg, match) => {
     const inline = match[1] ? match[1].trim() : null;
 
     if (inline) {
-        saveBankDetails(inline);
-        return bot.sendMessage(chatId, `✅ Datos bancarios actualizados.\n\n${formatBankLines(inline)}`, { parse_mode: 'HTML' });
+        saveMethodDetails('mxn', inline);
+        return bot.sendMessage(chatId, `✅ Datos bancarios actualizados.\n\n${formatDetailLines(inline)}`, { parse_mode: 'HTML' });
     }
 
-    const current = loadBankDetails();
+    const current = loadMethodDetails('mxn');
     const sent = await bot.sendMessage(chatId,
-        (current ? `🏦 <b>Datos bancarios actuales:</b>\n\n${formatBankLines(current)}\n\n` : '🏦 Aún no hay datos bancarios configurados.\n\n') +
+        (current ? `🏦 <b>Datos bancarios actuales:</b>\n\n${formatDetailLines(current)}\n\n` : '🏦 Aún no hay datos bancarios configurados.\n\n') +
         'Envía en un solo mensaje los nuevos datos (CLABE, banco, titular) para actualizarlos.',
         { parse_mode: 'HTML' }
     );
-    awaitingBankUpdate.set(chatId, sent.message_id);
-    setTimeout(() => awaitingBankUpdate.delete(chatId), 30 * 60 * 1000);
+    awaitingMethodUpdate.set(chatId, { key: 'mxn', messageId: sent.message_id });
+    setTimeout(() => awaitingMethodUpdate.delete(chatId), 30 * 60 * 1000);
 });
 
 bot.onText(/\/addproducto(?:\s+(.+))?/, (msg, match) => {
@@ -540,12 +608,18 @@ function cobrarPanel() {
     return { text, keyboard: [] };
 }
 
-function bancoPanel() {
-    const current = loadBankDetails();
+function metodosPanel() {
+    const rows = Object.entries(PAYMENT_METHODS).map(([key, cfg]) => [{ text: cfg.label, callback_data: `panel_metodo_${key}` }]);
+    return { text: '💳 <b>Métodos de pago manuales</b>\n━━━━━━━━━━━━━━\nElige uno para ver o actualizar sus datos:', keyboard: rows };
+}
+
+function metodoDetallePanel(key) {
+    const cfg = PAYMENT_METHODS[key];
+    const current = loadMethodDetails(key);
     const text = current
-        ? `🏧 <b>Datos bancarios (transferencia MXN)</b>\n━━━━━━━━━━━━━━\n${formatBankLines(current)}`
-        : '🏧 <b>Datos bancarios (transferencia MXN)</b>\n━━━━━━━━━━━━━━\n⚠️ Aún no configurados.';
-    return { text, keyboard: [[{ text: '✏️ Actualizar', callback_data: 'panel_banco_edit' }]] };
+        ? `${cfg.label}\n━━━━━━━━━━━━━━\n${formatDetailLines(current)}`
+        : `${cfg.label}\n━━━━━━━━━━━━━━\n⚠️ Aún no configurado.`;
+    return { text, keyboard: [[{ text: '✏️ Actualizar', callback_data: `panel_metodo_edit_${key}` }]] };
 }
 
 function operadoresPanel() {
@@ -570,8 +644,9 @@ ${stripe ? '✅' : '❌'} Stripe (tarjeta)
 <b>Cobros:</b>
 /cobrar <code>&lt;monto&gt; [descripción] [chatId]</code>
 
-<b>Transferencia MXN:</b>
+<b>Métodos de pago manuales:</b>
 /datosbancarios <code>[CLABE / banco / titular]</code>
+(Binance ID y AirTM se configuran desde el botón "💳 Métodos de pago" del menú)
 
 <b>Catálogo (tienda pública /tienda):</b>
 /addproducto <code>&lt;precio&gt; &lt;nombre&gt;</code>
@@ -601,7 +676,7 @@ ${stripe ? '✅' : '❌'} Stripe (tarjeta)
 Elige una opción:`;
     const keyboard = [
         [{ text: '🛒 Catálogo', callback_data: 'panel_catalogo' }, { text: '📊 Ventas', callback_data: 'panel_ventas' }],
-        [{ text: '💰 Cobrar', callback_data: 'panel_cobrar' }, { text: '🏧 Datos bancarios', callback_data: 'panel_banco' }],
+        [{ text: '💰 Cobrar', callback_data: 'panel_cobrar' }, { text: '💳 Métodos de pago', callback_data: 'panel_metodos' }],
         [{ text: '📢 Promocionar', callback_data: 'panel_promocionar' }]
     ];
     if (isAdmin) keyboard.push([{ text: '👥 Operadores', callback_data: 'panel_operadores' }]);
@@ -716,21 +791,30 @@ bot.on('callback_query', async (cq) => {
         return editPanel(chatId, cq.message.message_id, cobrarPanel());
     }
 
-    if (data === 'panel_banco') {
+    if (data === 'panel_metodos') {
         if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
         bot.answerCallbackQuery(cq.id);
-        return editPanel(chatId, cq.message.message_id, bancoPanel());
+        return editPanel(chatId, cq.message.message_id, metodosPanel());
     }
 
-    if (data === 'panel_banco_edit') {
-        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+    if (data.startsWith('panel_metodo_edit_')) {
+        const key = data.replace('panel_metodo_edit_', '');
+        if (!isAllowed(chatId) || !PAYMENT_METHODS[key]) return bot.answerCallbackQuery(cq.id);
         bot.answerCallbackQuery(cq.id);
-        const result = await editOrSend(chatId, cq.message.message_id, '✏️ Envía en un solo mensaje los nuevos datos bancarios (CLABE, banco, titular).',
+        const cfg = PAYMENT_METHODS[key];
+        const result = await editOrSend(chatId, cq.message.message_id, `✏️ Envía en un solo mensaje los nuevos datos para ${cfg.label}.`,
             { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
         );
-        awaitingBankUpdate.set(chatId, result?.message_id || cq.message.message_id);
-        setTimeout(() => awaitingBankUpdate.delete(chatId), 30 * 60 * 1000);
+        awaitingMethodUpdate.set(chatId, { key, messageId: result?.message_id || cq.message.message_id });
+        setTimeout(() => awaitingMethodUpdate.delete(chatId), 30 * 60 * 1000);
         return;
+    }
+
+    if (data.startsWith('panel_metodo_')) {
+        const key = data.replace('panel_metodo_', '');
+        if (!isAllowed(chatId) || !PAYMENT_METHODS[key]) return bot.answerCallbackQuery(cq.id);
+        bot.answerCallbackQuery(cq.id);
+        return editPanel(chatId, cq.message.message_id, metodoDetallePanel(key));
     }
 
     if (data === 'panel_promocionar') {
@@ -814,8 +898,11 @@ bot.on('callback_query', async (cq) => {
         return editOrSend(chatId, cq.message.message_id, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
     }
 
-    if (data.startsWith('pay_t_')) {
-        const pendingId = data.replace('pay_t_', '');
+    if (data.startsWith('pay_m_')) {
+        const match = data.match(/^pay_m_(mxn|binance|airtm)_(.+)$/);
+        if (!match) return bot.answerCallbackQuery(cq.id);
+        const [, methodKey, pendingId] = match;
+        const methodCfg = PAYMENT_METHODS[methodKey];
         const pending   = pendingPayments.get(pendingId);
 
         if (!pending) {
@@ -829,45 +916,52 @@ bot.on('callback_query', async (cq) => {
         const customerChatId  = fromOperator ? targetChatId : replyChatId;
         const askChatId       = fromOperator ? replyChatId : ADMIN_CHAT_ID;
 
-        const bankText = loadBankDetails();
-        if (!bankText) {
-            bot.answerCallbackQuery(cq.id, { text: '❌ Datos bancarios no configurados.' });
-            await bot.sendMessage(askChatId, '⚠️ Un cliente quiere pagar por transferencia MXN pero no hay datos bancarios configurados. Usa /datosbancarios para configurarlos.').catch(() => {});
+        const methodText = loadMethodDetails(methodKey);
+        if (!methodText) {
+            bot.answerCallbackQuery(cq.id, { text: '❌ Método no configurado.' });
+            await bot.sendMessage(askChatId, `⚠️ Un cliente quiere pagar por ${methodCfg.title} pero no hay datos configurados. Ve a "💳 Métodos de pago" en el menú para configurarlos.`).catch(() => {});
             return;
         }
 
         bot.answerCallbackQuery(cq.id);
 
         const transferId = crypto.randomBytes(4).toString('hex');
-        pendingTransfers.set(transferId, { customerChatId, amount, description, operatorChatId: askChatId });
-        setTimeout(() => pendingTransfers.delete(transferId), 24 * 60 * 60 * 1000);
+        pendingTransfers.set(transferId, { customerChatId, amount, description, operatorChatId: askChatId, method: methodKey });
+        setTimeout(() => { pendingTransfers.delete(transferId); persistTransfersState(); }, 24 * 60 * 60 * 1000);
         if (customerChatId) {
             transferByCustomer.set(customerChatId, { transferId, operatorChatId: askChatId });
-            setTimeout(() => transferByCustomer.delete(customerChatId), 24 * 60 * 60 * 1000);
+            setTimeout(() => { transferByCustomer.delete(customerChatId); persistTransfersState(); }, 24 * 60 * 60 * 1000);
         }
+        persistTransfersState();
 
-        const mxnRate   = await getMxnRate();
-        const mxnAmount = (parseFloat(amount) * mxnRate).toFixed(2);
-        const bankMsg =
-`🏧 <b>Datos para tu transferencia</b>
+        let amountLine = `💰 $${parseFloat(amount).toFixed(2)} USD — ${description}`;
+        if (methodCfg.mxn) {
+            const mxnRate   = await getMxnRate();
+            const mxnAmount = (parseFloat(amount) * mxnRate).toFixed(2);
+            amountLine = `💰 $${parseFloat(amount).toFixed(2)} USD ≈ <b>$${mxnAmount} MXN</b> — ${description}`;
+        }
+        const payMsg =
+`${methodCfg.label} <b>Datos para tu pago</b>
 ━━━━━━━━━━━━━━
-💰 $${parseFloat(amount).toFixed(2)} USD ≈ <b>$${mxnAmount} MXN</b> — ${description}
+${amountLine}
 
-${formatBankLines(bankText)}
+${formatDetailLines(methodText)}
 
 Envía la foto de tu comprobante aquí una vez hecho el pago.`;
 
         if (!customerChatId || chatId === customerChatId) {
             // no hay un chat de cliente distinto vinculado (o el que clickeó es el cliente): mostrar los datos aquí mismo
-            await editOrSend(chatId, cq.message.message_id, bankMsg, { parse_mode: 'HTML' });
+            await editOrSend(chatId, cq.message.message_id, payMsg, { parse_mode: 'HTML' });
         } else {
-            await editOrSend(chatId, cq.message.message_id, '✅ Datos bancarios enviados al cliente. Te aviso cuando mande el comprobante.', {});
-            await bot.sendMessage(customerChatId, bankMsg, { parse_mode: 'HTML' }).catch(() => {});
+            await editOrSend(chatId, cq.message.message_id, '✅ Datos enviados al cliente. Te aviso cuando mande el comprobante.', {});
+            await bot.sendMessage(customerChatId, payMsg, { parse_mode: 'HTML' }).catch(() => {});
         }
 
-        if (askChatId !== chatId && askChatId !== customerChatId) {
-            await bot.sendMessage(askChatId, `🏧 Transferencia MXN solicitada — $${parseFloat(amount).toFixed(2)} USD — ${description}.\nDatos enviados al cliente, te aviso cuando llegue el comprobante.`).catch(() => {});
-        }
+        notifyAllOperators(
+            `${methodCfg.label} solicitado — $${parseFloat(amount).toFixed(2)} USD — ${description}.\nDatos enviados al cliente, esperando comprobante.`,
+            {},
+            [chatId, customerChatId].filter(Boolean)
+        );
         return;
     }
 
@@ -879,17 +973,25 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
 
         pendingTransfers.delete(transferId);
         if (transfer.customerChatId) transferByCustomer.delete(transfer.customerChatId);
-        recordSale({ date: new Date().toISOString(), method: 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId });
+        persistTransfersState();
+        const methodLabel = PAYMENT_METHODS[transfer.method]?.label || '🏧 Transferencia MXN';
+        recordSale({ date: new Date().toISOString(), method: transfer.method || 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId });
 
         bot.answerCallbackQuery(cq.id, { text: '✅ Venta confirmada.' });
         await editOrSend(chatId, cq.message.message_id,
             `✅ <b>Pago confirmado</b>\n💰 $${parseFloat(transfer.amount).toFixed(2)} USD — ${transfer.description}`,
             { parse_mode: 'HTML' }
         );
+        notifyAllOperators(
+            `✅ ${methodLabel} confirmada por otro operador — $${parseFloat(transfer.amount).toFixed(2)} USD — ${transfer.description}`,
+            {},
+            [chatId]
+        );
 
         if (transfer.customerChatId) {
             awaitingDelivery.set(chatId, { customerChatId: transfer.customerChatId, description: transfer.description });
-            setTimeout(() => awaitingDelivery.delete(chatId), 30 * 60 * 1000);
+            persistTransfersState();
+            setTimeout(() => { awaitingDelivery.delete(chatId); persistTransfersState(); }, 30 * 60 * 1000);
             await bot.sendMessage(chatId, '✏️ Escribe la cuenta a entregar (formato correo:contraseña).');
         } else {
             await bot.sendMessage(chatId, 'ℹ️ No hay un chat de cliente vinculado — entrégale la cuenta manualmente.');
@@ -986,7 +1088,14 @@ bot.on('message', async (msg) => {
             }
             pendingTransfers.delete(transferId);
             if (transfer.customerChatId) transferByCustomer.delete(transfer.customerChatId);
-            recordSale({ date: new Date().toISOString(), method: 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId });
+            persistTransfersState();
+            const methodLabel = PAYMENT_METHODS[transfer.method]?.label || '🏧 Transferencia MXN';
+            recordSale({ date: new Date().toISOString(), method: transfer.method || 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId });
+            notifyAllOperators(
+                `✅ ${methodLabel} confirmada y entregada por otro operador — $${parseFloat(transfer.amount).toFixed(2)} USD — ${transfer.description}`,
+                {},
+                [chatId]
+            );
 
             if (transfer.customerChatId) {
                 const formatted = msg.text ? formatDelivery(msg.text, transfer.description) : null;
@@ -1009,6 +1118,7 @@ bot.on('message', async (msg) => {
     const delivery = awaitingDelivery.get(chatId);
     if (delivery && !(msg.text && msg.text.startsWith('/'))) {
         awaitingDelivery.delete(chatId);
+        persistTransfersState();
         const formatted = msg.text ? formatDelivery(msg.text, delivery.description) : null;
         const sendToCustomer = formatted
             ? bot.sendMessage(delivery.customerChatId, formatted, { parse_mode: 'HTML' })
@@ -1027,7 +1137,8 @@ bot.on('message', async (msg) => {
         bot.copyMessage(awaitingProof.operatorChatId, chatId, msg.message_id)
             .then((sent) => {
                 transferMessages.set(`${awaitingProof.operatorChatId}:${sent.message_id}`, awaitingProof.transferId);
-                setTimeout(() => transferMessages.delete(`${awaitingProof.operatorChatId}:${sent.message_id}`), 24 * 60 * 60 * 1000);
+                persistTransfersState();
+                setTimeout(() => { transferMessages.delete(`${awaitingProof.operatorChatId}:${sent.message_id}`); persistTransfersState(); }, 24 * 60 * 60 * 1000);
                 return bot.sendMessage(awaitingProof.operatorChatId,
                     '📎 Comprobante recibido del cliente (arriba 👆). Responde a este mensaje con la cuenta para confirmar y entregársela junto con el agradecimiento, o usa el botón para solo confirmar.', {
                         reply_markup: { inline_keyboard: [[{ text: '✅ Confirmar pago recibido', callback_data: `confirm_transfer_${awaitingProof.transferId}` }]] }
@@ -1036,7 +1147,8 @@ bot.on('message', async (msg) => {
             .then((sent2) => {
                 if (sent2) {
                     transferMessages.set(`${awaitingProof.operatorChatId}:${sent2.message_id}`, awaitingProof.transferId);
-                    setTimeout(() => transferMessages.delete(`${awaitingProof.operatorChatId}:${sent2.message_id}`), 24 * 60 * 60 * 1000);
+                    persistTransfersState();
+                    setTimeout(() => { transferMessages.delete(`${awaitingProof.operatorChatId}:${sent2.message_id}`); persistTransfersState(); }, 24 * 60 * 60 * 1000);
                 }
             })
             .catch(() => {});
@@ -1053,12 +1165,12 @@ bot.on('message', async (msg) => {
         return;
     }
 
-    // Texto para actualizar los datos bancarios por defecto (tras /datosbancarios o el botón "✏️ Actualizar")
-    if (awaitingBankUpdate.has(chatId)) {
-        const messageId = awaitingBankUpdate.get(chatId);
-        awaitingBankUpdate.delete(chatId);
-        saveBankDetails(msg.text);
-        await replacePanel(chatId, messageId, `✅ Datos bancarios actualizados.\n\n${formatBankLines(msg.text)}`, { parse_mode: 'HTML' });
+    // Texto para actualizar un método de pago (tras /datosbancarios o el botón "✏️ Actualizar")
+    if (awaitingMethodUpdate.has(chatId)) {
+        const { key, messageId } = awaitingMethodUpdate.get(chatId);
+        awaitingMethodUpdate.delete(chatId);
+        saveMethodDetails(key, msg.text);
+        await replacePanel(chatId, messageId, `✅ ${PAYMENT_METHODS[key].label} actualizado.\n\n${formatDetailLines(msg.text)}`, { parse_mode: 'HTML' });
         return;
     }
 });
