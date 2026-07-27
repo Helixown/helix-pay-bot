@@ -1,4 +1,5 @@
 require('dotenv').config();
+require('dns').setDefaultResultOrder('ipv4first'); // evita 502/504 intermitentes de Telegram por resolucion IPv6 en Railway
 const TelegramBot = require('node-telegram-bot-api');
 const express    = require('express');
 const axios      = require('axios');
