@@ -232,6 +232,23 @@ async function createStripeCheckout(amount, description) {
     return session;
 }
 
+// ── Tipo de cambio USD -> MXN ─────────────────────────────────────────────────
+const MXN_RATE_FALLBACK = parseFloat(process.env.MXN_RATE_FALLBACK || '18.50');
+const MXN_RATE_TTL_MS   = 6 * 60 * 60 * 1000; // 6 horas
+let mxnRateCache = { rate: MXN_RATE_FALLBACK, fetchedAt: 0 };
+
+async function getMxnRate() {
+    if (Date.now() - mxnRateCache.fetchedAt < MXN_RATE_TTL_MS) return mxnRateCache.rate;
+    try {
+        const res  = await axios.get('https://open.er-api.com/v6/latest/USD', { timeout: 5000 });
+        const rate = res.data?.rates?.MXN;
+        if (rate) mxnRateCache = { rate, fetchedAt: Date.now() };
+    } catch {
+        // si falla, seguimos usando la tasa cacheada (o el respaldo fijo) sin bloquear el flujo
+    }
+    return mxnRateCache.rate;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 async function sendPaymentLink(chatId, url, amount, description, method, txId) {
     const methodLabel = method === 'stripe' ? '💳 Stripe (tarjeta)' : '🏦 Paddle (PayPal)';
@@ -305,11 +322,22 @@ bot.onText(/\/listproductos/, (msg) => {
     bot.sendMessage(msg.chat.id, `📦 <b>Catálogo</b>\n${lista}`, { parse_mode: 'HTML' });
 });
 
-function sendTienda(chatId) {
+function tiendaPanel() {
     const ids = Object.keys(catalog.items);
-    if (!ids.length) return bot.sendMessage(chatId, '🛒 No hay productos disponibles por el momento.');
+    if (!ids.length) return { text: '🛒 No hay productos disponibles por el momento.', keyboard: [] };
     const buttons = ids.map(id => ([{ text: `${catalog.items[id].name} — $${catalog.items[id].price.toFixed(2)}`, callback_data: `buy_${id}` }]));
-    bot.sendMessage(chatId, '🛒 <b>JH STORE</b>\nElige un producto:', { parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
+    return { text: '🛒 <b>JH STORE</b>\nElige un producto:', keyboard: buttons };
+}
+
+function sendTienda(chatId) {
+    const panel = tiendaPanel();
+    bot.sendMessage(chatId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
+}
+
+function editTienda(chatId, messageId) {
+    const panel = tiendaPanel();
+    return bot.editMessageText(panel.text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } })
+        .catch(() => sendTienda(chatId));
 }
 
 bot.onText(/\/tienda/, (msg) => {
@@ -420,7 +448,12 @@ bot.on('callback_query', async (cq) => {
 
     if (data === 'open_tienda') {
         bot.answerCallbackQuery(cq.id);
-        return sendTienda(chatId);
+        return editTienda(chatId, cq.message.message_id);
+    }
+
+    if (data === 'back_tienda') {
+        bot.answerCallbackQuery(cq.id);
+        return editTienda(chatId, cq.message.message_id);
     }
 
     if (data === 'reset_ventas_ask') {
@@ -458,11 +491,11 @@ bot.on('callback_query', async (cq) => {
         if (stripe) row1.push({ text: '💳 Tarjeta (Stripe)', callback_data: `pay_s_${pendingId}` });
         row1.push({ text: '🏦 PayPal (Paddle)', callback_data: `pay_p_${pendingId}` });
 
-        return bot.sendMessage(chatId,
-`💰 <b>$${product.price.toFixed(2)} USD</b> — ${product.name}
-Selecciona método de pago:`,
-            { parse_mode: 'HTML', reply_markup: { inline_keyboard: [row1, [{ text: '🏧 Transferencia MXN', callback_data: `pay_t_${pendingId}` }]] } }
-        );
+        const text = `💰 <b>$${product.price.toFixed(2)} USD</b> — ${product.name}\nSelecciona método de pago:`;
+        const keyboard = [row1, [{ text: '🏧 Transferencia MXN', callback_data: `pay_t_${pendingId}` }], [{ text: '⬅️ Volver al catálogo', callback_data: 'back_tienda' }]];
+
+        return bot.editMessageText(text, { chat_id: chatId, message_id: cq.message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } })
+            .catch(() => bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } }));
     }
 
     if (data.startsWith('pay_t_')) {
@@ -475,7 +508,6 @@ Selecciona método de pago:`,
         }
 
         bot.answerCallbackQuery(cq.id);
-        await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: cq.message.message_id }).catch(() => {});
 
         const { amount, description, targetChatId, operatorChatId } = pending;
         const replyChatId    = operatorChatId || ADMIN_CHAT_ID;
@@ -487,17 +519,23 @@ Selecciona método de pago:`,
         awaitingBankDetails.set(askChatId, { transferId, customerChatId, amount, description });
         setTimeout(() => awaitingBankDetails.delete(askChatId), 30 * 60 * 1000);
 
-        await bot.sendMessage(askChatId,
+        const askText =
 `🏧 <b>Transferencia MXN solicitada</b>
 ━━━━━━━━━━━━━━
 💰 $${parseFloat(amount).toFixed(2)} USD — ${description}
 
-Escribe en un solo mensaje los datos bancarios (CLABE, banco, titular) y se los reenvío al cliente.`,
-            { parse_mode: 'HTML' }
-        );
+Escribe en un solo mensaje los datos bancarios (CLABE, banco, titular) y se los reenvío al cliente.`;
+        const waitingText = '⏳ En un momento te enviamos los datos para hacer tu transferencia.';
 
-        if (customerChatId) {
-            await bot.sendMessage(customerChatId, '⏳ En un momento te enviamos los datos para hacer tu transferencia.').catch(() => {});
+        if (chatId === askChatId) {
+            await bot.editMessageText(askText, { chat_id: chatId, message_id: cq.message.message_id, parse_mode: 'HTML' }).catch(() => {});
+        } else {
+            await bot.editMessageText(waitingText, { chat_id: chatId, message_id: cq.message.message_id }).catch(() => {});
+            await bot.sendMessage(askChatId, askText, { parse_mode: 'HTML' });
+        }
+
+        if (customerChatId && customerChatId !== chatId) {
+            await bot.sendMessage(customerChatId, waitingText).catch(() => {});
         }
         return;
     }
@@ -539,7 +577,6 @@ Escribe en un solo mensaje los datos bancarios (CLABE, banco, titular) y se los 
         }
 
         bot.answerCallbackQuery(cq.id, { text: '⏳ Generando link...' });
-        await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: cq.message.chat.id, message_id: cq.message.message_id }).catch(() => {});
 
         const { amount, description, targetChatId, operatorChatId } = pending;
         const replyChatId = operatorChatId || ADMIN_CHAT_ID;
@@ -560,11 +597,10 @@ Escribe en un solo mensaje los datos bancarios (CLABE, banco, titular) y se los 
             const linkId      = saveLink({ amount, description, method, url });
             const payPageUrl  = `${APP_BASE_URL}/pay/${linkId}`;
             const secureButton = { inline_keyboard: [[{ text: 'Pagar', web_app: { url: payPageUrl } }]] };
+            const panelText = `💰 <b>$${parseFloat(amount).toFixed(2)} USD</b> — ${description}`;
 
-            await bot.sendMessage(replyChatId,
-                `💰 <b>$${parseFloat(amount).toFixed(2)} USD</b> — ${description}`,
-                { parse_mode: 'HTML', reply_markup: secureButton }
-            );
+            await bot.editMessageText(panelText, { chat_id: replyChatId, message_id: cq.message.message_id, parse_mode: 'HTML', reply_markup: secureButton })
+                .catch(() => bot.sendMessage(replyChatId, panelText, { parse_mode: 'HTML', reply_markup: secureButton }));
 
             const fromOperator = isAllowed(replyChatId);
             const label = replyChatId === ADMIN_CHAT_ID ? '🧾 Cobro generado'
@@ -586,13 +622,14 @@ Escribe en un solo mensaje los datos bancarios (CLABE, banco, titular) y se los 
             }
         } catch (err) {
             const detail = err.response?.data?.error?.detail || err.message;
-            await bot.sendMessage(replyChatId, `❌ Error: ${detail}`);
+            await bot.editMessageText(`❌ Error: ${detail}`, { chat_id: replyChatId, message_id: cq.message.message_id })
+                .catch(() => bot.sendMessage(replyChatId, `❌ Error: ${detail}`));
         }
     }
 });
 
 // ── Captura de datos bancarios (transferencia MXN) ────────────────────────────
-bot.on('message', (msg) => {
+bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
 
     // Responder (reply) al comprobante con la cuenta = confirmar + entregar en un solo paso
@@ -686,10 +723,12 @@ bot.on('message', (msg) => {
             if (trimmed.includes(':')) return escBank(trimmed);
             return `<code>${escBank(trimmed)}</code>`;
         }).join('\n');
+        const mxnRate   = await getMxnRate();
+        const mxnAmount = (parseFloat(amount) * mxnRate).toFixed(2);
         bot.sendMessage(customerChatId,
 `🏧 <b>Datos para tu transferencia</b>
 ━━━━━━━━━━━━━━
-💰 $${parseFloat(amount).toFixed(2)} USD — ${description}
+💰 $${parseFloat(amount).toFixed(2)} USD ≈ <b>$${mxnAmount} MXN</b> — ${description}
 
 ${bankDetails}
 
