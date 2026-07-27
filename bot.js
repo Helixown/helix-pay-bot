@@ -71,6 +71,10 @@ function savePending(amount, description, targetChatId, operatorChatId) {
     return id;
 }
 
+// ── Transferencia MXN manual (in-memory) ─────────────────────────────────────
+const awaitingBankDetails = new Map(); // chatId del operador -> { transferId, customerChatId, amount, description }
+const pendingTransfers    = new Map(); // transferId -> { customerChatId, amount, description }
+
 // ── Payment landing pages (mini app) ─────────────────────────────────────────
 const paymentLinks = new Map();
 function saveLink(data) {
@@ -383,14 +387,14 @@ bot.onText(/\/cobrar(?:\s+(.+))?/, async (msg, match) => {
     const description = descParts.join(' ') || 'Pedido personalizado';
     const pendingId   = savePending(amount, description, targetChatId, chatId);
 
-    const buttons = [];
-    if (stripe) buttons.push({ text: '💳 Tarjeta (Stripe)', callback_data: `pay_s_${pendingId}` });
-    buttons.push({ text: '🏦 PayPal (Paddle)', callback_data: `pay_p_${pendingId}` });
+    const row1 = [];
+    if (stripe) row1.push({ text: '💳 Tarjeta (Stripe)', callback_data: `pay_s_${pendingId}` });
+    row1.push({ text: '🏦 PayPal (Paddle)', callback_data: `pay_p_${pendingId}` });
 
     await bot.sendMessage(chatId,
 `💰 <b>$${parseFloat(amount).toFixed(2)} USD</b> — ${description}
 Selecciona método de pago:`,
-        { parse_mode: 'HTML', reply_markup: { inline_keyboard: [buttons] } }
+        { parse_mode: 'HTML', reply_markup: { inline_keyboard: [row1, [{ text: '🏧 Transferencia MXN', callback_data: `pay_t_${pendingId}` }]] } }
     );
 });
 
@@ -435,15 +439,73 @@ bot.on('callback_query', async (cq) => {
 
         bot.answerCallbackQuery(cq.id);
         const pendingId = savePending(product.price, product.name, null, chatId);
-        const buttons = [];
-        if (stripe) buttons.push({ text: '💳 Tarjeta (Stripe)', callback_data: `pay_s_${pendingId}` });
-        buttons.push({ text: '🏦 PayPal (Paddle)', callback_data: `pay_p_${pendingId}` });
+        const row1 = [];
+        if (stripe) row1.push({ text: '💳 Tarjeta (Stripe)', callback_data: `pay_s_${pendingId}` });
+        row1.push({ text: '🏦 PayPal (Paddle)', callback_data: `pay_p_${pendingId}` });
 
         return bot.sendMessage(chatId,
 `💰 <b>$${product.price.toFixed(2)} USD</b> — ${product.name}
 Selecciona método de pago:`,
-            { parse_mode: 'HTML', reply_markup: { inline_keyboard: [buttons] } }
+            { parse_mode: 'HTML', reply_markup: { inline_keyboard: [row1, [{ text: '🏧 Transferencia MXN', callback_data: `pay_t_${pendingId}` }]] } }
         );
+    }
+
+    if (data.startsWith('pay_t_')) {
+        const pendingId = data.replace('pay_t_', '');
+        const pending   = pendingPayments.get(pendingId);
+
+        if (!pending) {
+            bot.answerCallbackQuery(cq.id, { text: '❌ Solicitud expirada.' });
+            return bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: cq.message.message_id }).catch(() => {});
+        }
+
+        bot.answerCallbackQuery(cq.id);
+        await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: cq.message.message_id }).catch(() => {});
+
+        const { amount, description, targetChatId, operatorChatId } = pending;
+        const replyChatId    = operatorChatId || ADMIN_CHAT_ID;
+        const fromOperator    = isAllowed(replyChatId);
+        const customerChatId  = fromOperator ? targetChatId : replyChatId;
+        const askChatId       = fromOperator ? replyChatId : ADMIN_CHAT_ID;
+        const transferId       = crypto.randomBytes(4).toString('hex');
+
+        awaitingBankDetails.set(askChatId, { transferId, customerChatId, amount, description });
+        setTimeout(() => awaitingBankDetails.delete(askChatId), 30 * 60 * 1000);
+
+        await bot.sendMessage(askChatId,
+`🏧 <b>Transferencia MXN solicitada</b>
+━━━━━━━━━━━━━━
+💰 $${parseFloat(amount).toFixed(2)} USD — ${description}
+
+Escribe en un solo mensaje los datos bancarios (CLABE, banco, titular) y se los reenvío al cliente.`,
+            { parse_mode: 'HTML' }
+        );
+
+        if (customerChatId) {
+            await bot.sendMessage(customerChatId, '⏳ En un momento te enviamos los datos para hacer tu transferencia.').catch(() => {});
+        }
+        return;
+    }
+
+    if (data.startsWith('confirm_transfer_')) {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        const transferId = data.replace('confirm_transfer_', '');
+        const transfer   = pendingTransfers.get(transferId);
+        if (!transfer) return bot.answerCallbackQuery(cq.id, { text: '❌ Ya no disponible.' });
+
+        pendingTransfers.delete(transferId);
+        recordSale({ date: new Date().toISOString(), method: 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId });
+
+        bot.answerCallbackQuery(cq.id, { text: '✅ Venta confirmada.' });
+        await bot.editMessageText(
+            `✅ <b>Pago confirmado</b>\n💰 $${parseFloat(transfer.amount).toFixed(2)} USD — ${transfer.description}`,
+            { chat_id: chatId, message_id: cq.message.message_id, parse_mode: 'HTML' }
+        ).catch(() => {});
+
+        if (transfer.customerChatId) {
+            bot.sendMessage(transfer.customerChatId, '✅ ¡Pago confirmado! Gracias por tu compra 🎉').catch(() => {});
+        }
+        return;
     }
 
     if (data.startsWith('pay_s_') || data.startsWith('pay_p_')) {
@@ -516,6 +578,37 @@ Selecciona método de pago:`,
             await bot.sendMessage(replyChatId, `❌ Error: ${detail}`);
         }
     }
+});
+
+// ── Captura de datos bancarios (transferencia MXN) ────────────────────────────
+bot.on('message', (msg) => {
+    const chatId = msg.chat.id;
+    if (!msg.text || msg.text.startsWith('/')) return;
+
+    const waiting = awaitingBankDetails.get(chatId);
+    if (!waiting) return;
+    awaitingBankDetails.delete(chatId);
+
+    const { transferId, customerChatId, amount, description } = waiting;
+    pendingTransfers.set(transferId, { customerChatId, amount, description });
+    setTimeout(() => pendingTransfers.delete(transferId), 24 * 60 * 60 * 1000);
+
+    const confirmButton = { inline_keyboard: [[{ text: '✅ Confirmar pago recibido', callback_data: `confirm_transfer_${transferId}` }]] };
+
+    if (customerChatId) {
+        bot.sendMessage(customerChatId,
+`🏧 <b>Datos para tu transferencia</b>
+━━━━━━━━━━━━━━
+💰 $${parseFloat(amount).toFixed(2)} USD — ${description}
+
+${msg.text}
+
+Envía tu comprobante aquí una vez hecho el pago.`,
+            { parse_mode: 'HTML' }
+        ).catch(() => {});
+    }
+
+    bot.sendMessage(chatId, '✅ Datos enviados al cliente. Cuando confirmes que llegó el pago, toca el botón:', { reply_markup: confirmButton });
 });
 
 // ── Webhook Paddle ────────────────────────────────────────────────────────────
