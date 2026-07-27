@@ -15,6 +15,7 @@ const STRIPE_SECRET_KEY     = process.env.STRIPE_SECRET_KEY || '';
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 const PUBLIC_URL            = process.env.PUBLIC_URL || 'https://helix-pay-bot-production.up.railway.app';
 const APP_BASE_URL          = process.env.APP_BASE_URL || 'https://helix-pay-bot-production.up.railway.app';
+const CHANNEL_ID            = process.env.CHANNEL_ID || '@Cuentasonlyfans23k';
 const PORT                  = process.env.PORT || 3000;
 
 const bot    = new TelegramBot(BOT_TOKEN, { polling: true });
@@ -123,6 +124,8 @@ function metodoPagoPanel(pendingId, amount, description, showCatalogoBack) {
     if (showCatalogoBack) keyboard.push([{ text: '⬅️ Volver al catálogo', callback_data: 'back_tienda' }]);
     return { text: `💰 <b>$${parseFloat(amount).toFixed(2)} USD</b> — ${description}\nSelecciona método de pago:`, keyboard };
 }
+
+const awaitingCanalPost = new Map(); // chatId del operador -> message_id del panel a editar, mientras espera el texto para el canal
 
 // ── Transferencia MXN manual (in-memory) ─────────────────────────────────────
 const awaitingBankUpdate  = new Set(); // chatId del operador que va a enviar el texto para actualizar los datos bancarios
@@ -418,23 +421,40 @@ bot.onText(/\/tienda/, (msg) => {
     sendTienda(msg.chat.id);
 });
 
-bot.onText(/\/promocanal(?:\s+(\S+))?(?:\s+([\s\S]+))?/, async (msg, match) => {
-    if (!isAllowed(msg.chat.id)) return;
-    const target = match[1];
-    if (!target) {
-        return bot.sendMessage(msg.chat.id, '❌ Uso: /promocanal <@canal o chatId> [texto]\nEjemplo: /promocanal @jhstorecanal ¡Nuevos productos disponibles!');
-    }
-    const text = (match[2] || '').trim() || '🛒 Descubre nuestros productos y paga 100% seguro. Toca el botón para ir a la tienda.';
+async function postToChannel(fromChatId, text, editTarget) {
+    const finalText = text.trim() || '🛒 Descubre nuestros productos y paga 100% seguro. Toca el botón para ir a la tienda.';
+    const menuButton = { text: '⬅️ Menú', callback_data: 'panel_home' };
 
     try {
         const username = await getBotUsername();
-        await bot.sendMessage(target, text, {
+        const sent = await bot.sendMessage(CHANNEL_ID, finalText, {
             reply_markup: { inline_keyboard: [[{ text: '🛒 Ir a la tienda', url: `https://t.me/${username}?start=tienda` }]] }
         });
-        bot.sendMessage(msg.chat.id, '✅ Publicado en el canal.');
+
+        const postUrl = CHANNEL_ID.startsWith('@') ? `https://t.me/${CHANNEL_ID.slice(1)}/${sent.message_id}` : null;
+        const confirmText = `✅ Publicado en ${CHANNEL_ID}.`;
+        const confirmKeyboard = postUrl ? [[{ text: '👀 Ver publicación', url: postUrl }], [menuButton]] : [[menuButton]];
+
+        if (editTarget) {
+            await bot.editMessageText(confirmText, { chat_id: editTarget.chatId, message_id: editTarget.messageId, reply_markup: { inline_keyboard: confirmKeyboard } })
+                .catch(() => bot.sendMessage(fromChatId, confirmText, { reply_markup: { inline_keyboard: confirmKeyboard } }));
+        } else {
+            bot.sendMessage(fromChatId, confirmText, { reply_markup: { inline_keyboard: confirmKeyboard } });
+        }
     } catch (err) {
-        bot.sendMessage(msg.chat.id, `❌ No se pudo publicar: ${err.message}\nAsegúrate de que el bot sea admin del canal y que el @usuario/chatId sea correcto.`);
+        const errorText = `❌ No se pudo publicar: ${err.message}\nAsegúrate de que el bot sea admin de ${CHANNEL_ID}.`;
+        if (editTarget) {
+            await bot.editMessageText(errorText, { chat_id: editTarget.chatId, message_id: editTarget.messageId, reply_markup: { inline_keyboard: [[menuButton]] } })
+                .catch(() => bot.sendMessage(fromChatId, errorText));
+        } else {
+            bot.sendMessage(fromChatId, errorText);
+        }
     }
+}
+
+bot.onText(/\/promocanal(?:\s+([\s\S]+))?/, (msg, match) => {
+    if (!isAllowed(msg.chat.id)) return;
+    postToChannel(msg.chat.id, match[1] || '');
 });
 
 function ventasPanel() {
@@ -523,7 +543,7 @@ ${stripe ? '✅' : '❌'} Stripe (tarjeta)
 /delproducto <code>&lt;id&gt;</code>
 
 <b>Promoción:</b>
-/promocanal <code>&lt;@canal o chatId&gt; [texto]</code>
+/promocanal <code>[texto]</code> — publica en ${CHANNEL_ID}
 
 <b>Ventas:</b>
 /ventas
@@ -544,7 +564,8 @@ ${stripe ? '✅' : '❌'} Stripe (tarjeta)
 Elige una opción:`;
     const keyboard = [
         [{ text: '🛒 Catálogo', callback_data: 'panel_catalogo' }, { text: '📊 Ventas', callback_data: 'panel_ventas' }],
-        [{ text: '💰 Cobrar', callback_data: 'panel_cobrar' }, { text: '🏧 Datos bancarios', callback_data: 'panel_banco' }]
+        [{ text: '💰 Cobrar', callback_data: 'panel_cobrar' }, { text: '🏧 Datos bancarios', callback_data: 'panel_banco' }],
+        [{ text: '📢 Promocionar', callback_data: 'panel_promocionar' }]
     ];
     if (isAdmin) keyboard.push([{ text: '👥 Operadores', callback_data: 'panel_operadores' }]);
     keyboard.push([{ text: '📖 Todos los comandos', callback_data: 'panel_comandos' }]);
@@ -665,6 +686,16 @@ bot.on('callback_query', async (cq) => {
         awaitingBankUpdate.add(chatId);
         setTimeout(() => awaitingBankUpdate.delete(chatId), 30 * 60 * 1000);
         return bot.editMessageText('✏️ Envía en un solo mensaje los nuevos datos bancarios (CLABE, banco, titular).',
+            { chat_id: chatId, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
+        ).catch(() => {});
+    }
+
+    if (data === 'panel_promocionar') {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        bot.answerCallbackQuery(cq.id);
+        awaitingCanalPost.set(chatId, cq.message.message_id);
+        setTimeout(() => awaitingCanalPost.delete(chatId), 30 * 60 * 1000);
+        return bot.editMessageText(`📢 Envía el texto que quieres publicar en ${CHANNEL_ID}.`,
             { chat_id: chatId, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
         ).catch(() => {});
     }
@@ -956,6 +987,14 @@ bot.on('message', async (msg) => {
     }
 
     if (!msg.text || msg.text.startsWith('/')) return;
+
+    // Texto para publicar en el canal (tras el botón "📢 Promocionar")
+    if (awaitingCanalPost.has(chatId)) {
+        const messageId = awaitingCanalPost.get(chatId);
+        awaitingCanalPost.delete(chatId);
+        await postToChannel(chatId, msg.text, { chatId, messageId });
+        return;
+    }
 
     // Texto para actualizar los datos bancarios por defecto (tras /datosbancarios)
     if (awaitingBankUpdate.has(chatId)) {
