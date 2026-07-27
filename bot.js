@@ -32,6 +32,13 @@ async function getBotUsername() {
     return cachedBotUsername;
 }
 
+// Reemplaza un panel: manda el mensaje nuevo (abajo del chat) y borra el anterior, en vez de editarlo en su lugar
+async function replacePanel(chatId, oldMessageId, text, options = {}) {
+    const sent = await bot.sendMessage(chatId, text, options);
+    if (oldMessageId) bot.deleteMessage(chatId, oldMessageId).catch(() => {});
+    return sent;
+}
+
 // ── Operadores ────────────────────────────────────────────────────────────────
 const OPERATORS_FILE = process.env.OPERATORS_FILE || path.join(__dirname, 'operators.json');
 function loadOperadores() {
@@ -412,8 +419,7 @@ function sendTienda(chatId) {
 
 function editTienda(chatId, messageId) {
     const panel = tiendaPanel();
-    return bot.editMessageText(panel.text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } })
-        .catch(() => sendTienda(chatId));
+    return replacePanel(chatId, messageId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
 }
 
 bot.onText(/\/tienda/, (msg) => {
@@ -438,16 +444,14 @@ async function postToChannel(fromChatId, text, editTarget) {
         const confirmKeyboard = [...(viewRow ? [viewRow] : []), deleteRow, [menuButton]];
 
         if (editTarget) {
-            await bot.editMessageText(confirmText, { chat_id: editTarget.chatId, message_id: editTarget.messageId, reply_markup: { inline_keyboard: confirmKeyboard } })
-                .catch(() => bot.sendMessage(fromChatId, confirmText, { reply_markup: { inline_keyboard: confirmKeyboard } }));
+            await replacePanel(editTarget.chatId, editTarget.messageId, confirmText, { reply_markup: { inline_keyboard: confirmKeyboard } });
         } else {
             bot.sendMessage(fromChatId, confirmText, { reply_markup: { inline_keyboard: confirmKeyboard } });
         }
     } catch (err) {
         const errorText = `❌ No se pudo publicar: ${err.message}\nAsegúrate de que el bot sea admin de ${CHANNEL_ID}.`;
         if (editTarget) {
-            await bot.editMessageText(errorText, { chat_id: editTarget.chatId, message_id: editTarget.messageId, reply_markup: { inline_keyboard: [[menuButton]] } })
-                .catch(() => bot.sendMessage(fromChatId, errorText));
+            await replacePanel(editTarget.chatId, editTarget.messageId, errorText, { reply_markup: { inline_keyboard: [[menuButton]] } });
         } else {
             bot.sendMessage(fromChatId, errorText);
         }
@@ -595,8 +599,7 @@ function withBack(keyboard) {
 
 function editPanel(chatId, messageId, panel) {
     const keyboard = withBack(panel.keyboard);
-    return bot.editMessageText(panel.text, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } })
-        .catch(() => bot.sendMessage(chatId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } }));
+    return replacePanel(chatId, messageId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
 }
 
 bot.onText(/\/ventas/, (msg) => {
@@ -669,8 +672,7 @@ bot.on('callback_query', async (cq) => {
         if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
         bot.answerCallbackQuery(cq.id);
         const panel = operatorHomePanel(chatId === ADMIN_CHAT_ID);
-        return bot.editMessageText(panel.text, { chat_id: chatId, message_id: cq.message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } })
-            .catch(() => bot.sendMessage(chatId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } }));
+        return replacePanel(chatId, cq.message.message_id, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
     }
 
     if (data === 'panel_catalogo') {
@@ -702,19 +704,20 @@ bot.on('callback_query', async (cq) => {
         bot.answerCallbackQuery(cq.id);
         awaitingBankUpdate.add(chatId);
         setTimeout(() => awaitingBankUpdate.delete(chatId), 30 * 60 * 1000);
-        return bot.editMessageText('✏️ Envía en un solo mensaje los nuevos datos bancarios (CLABE, banco, titular).',
-            { chat_id: chatId, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
-        ).catch(() => {});
+        return replacePanel(chatId, cq.message.message_id, '✏️ Envía en un solo mensaje los nuevos datos bancarios (CLABE, banco, titular).',
+            { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
+        );
     }
 
     if (data === 'panel_promocionar') {
         if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
         bot.answerCallbackQuery(cq.id);
-        awaitingCanalPost.set(chatId, cq.message.message_id);
+        const sent = await replacePanel(chatId, cq.message.message_id, `📢 Envía el texto que quieres publicar en ${CHANNEL_ID}.`,
+            { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
+        );
+        awaitingCanalPost.set(chatId, sent.message_id);
         setTimeout(() => awaitingCanalPost.delete(chatId), 30 * 60 * 1000);
-        return bot.editMessageText(`📢 Envía el texto que quieres publicar en ${CHANNEL_ID}.`,
-            { chat_id: chatId, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
-        ).catch(() => {});
+        return;
     }
 
     if (data.startsWith('del_canal_')) {
@@ -723,14 +726,14 @@ bot.on('callback_query', async (cq) => {
         try {
             await bot.deleteMessage(CHANNEL_ID, canalMessageId);
             bot.answerCallbackQuery(cq.id, { text: '🗑️ Publicación borrada.' });
-            await bot.editMessageText(`🗑️ Publicación borrada de ${CHANNEL_ID}.`,
-                { chat_id: chatId, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
-            ).catch(() => {});
+            await replacePanel(chatId, cq.message.message_id, `🗑️ Publicación borrada de ${CHANNEL_ID}.`,
+                { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
+            );
         } catch (err) {
             bot.answerCallbackQuery(cq.id, { text: '❌ No se pudo borrar.' });
-            await bot.editMessageText(`❌ No se pudo borrar la publicación: ${err.message}`,
-                { chat_id: chatId, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
-            ).catch(() => {});
+            await replacePanel(chatId, cq.message.message_id, `❌ No se pudo borrar la publicación: ${err.message}`,
+                { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
+            );
         }
         return;
     }
@@ -763,15 +766,15 @@ bot.on('callback_query', async (cq) => {
         sales.length = 0;
         fs.writeFileSync(SALES_FILE, JSON.stringify(sales, null, 2));
         bot.answerCallbackQuery(cq.id, { text: '✅ Contador reiniciado.' });
-        return bot.editMessageText('✅ Contador de ventas reiniciado a 0.',
-            { chat_id: chatId, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
+        return replacePanel(chatId, cq.message.message_id, '✅ Contador de ventas reiniciado a 0.',
+            { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
         );
     }
 
     if (data === 'reset_ventas_cancel') {
         bot.answerCallbackQuery(cq.id, { text: 'Cancelado.' });
-        return bot.editMessageText('❌ Reinicio cancelado, el contador sigue igual.',
-            { chat_id: chatId, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
+        return replacePanel(chatId, cq.message.message_id, '❌ Reinicio cancelado, el contador sigue igual.',
+            { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
         );
     }
 
@@ -784,8 +787,7 @@ bot.on('callback_query', async (cq) => {
         const pendingId = savePending(product.price, product.name, null, chatId);
         const panel     = metodoPagoPanel(pendingId, product.price, product.name, true);
 
-        return bot.editMessageText(panel.text, { chat_id: chatId, message_id: cq.message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } })
-            .catch(() => bot.sendMessage(chatId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } }));
+        return replacePanel(chatId, cq.message.message_id, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
     }
 
     if (data.startsWith('pay_t_')) {
@@ -794,7 +796,7 @@ bot.on('callback_query', async (cq) => {
 
         if (!pending) {
             bot.answerCallbackQuery(cq.id, { text: '❌ Solicitud expirada.' });
-            return bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: cq.message.message_id }).catch(() => {});
+            return bot.deleteMessage(chatId, cq.message.message_id).catch(() => {});
         }
 
         const { amount, description, targetChatId, operatorChatId } = pending;
@@ -833,10 +835,9 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
 
         if (!customerChatId || chatId === customerChatId) {
             // no hay un chat de cliente distinto vinculado (o el que clickeó es el cliente): mostrar los datos aquí mismo
-            await bot.editMessageText(bankMsg, { chat_id: chatId, message_id: cq.message.message_id, parse_mode: 'HTML' })
-                .catch(() => bot.sendMessage(chatId, bankMsg, { parse_mode: 'HTML' }));
+            await replacePanel(chatId, cq.message.message_id, bankMsg, { parse_mode: 'HTML' });
         } else {
-            await bot.editMessageText('✅ Datos bancarios enviados al cliente. Te aviso cuando mande el comprobante.', { chat_id: chatId, message_id: cq.message.message_id }).catch(() => {});
+            await replacePanel(chatId, cq.message.message_id, '✅ Datos bancarios enviados al cliente. Te aviso cuando mande el comprobante.', {});
             await bot.sendMessage(customerChatId, bankMsg, { parse_mode: 'HTML' }).catch(() => {});
         }
 
@@ -857,10 +858,10 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
         recordSale({ date: new Date().toISOString(), method: 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId });
 
         bot.answerCallbackQuery(cq.id, { text: '✅ Venta confirmada.' });
-        await bot.editMessageText(
+        await replacePanel(chatId, cq.message.message_id,
             `✅ <b>Pago confirmado</b>\n💰 $${parseFloat(transfer.amount).toFixed(2)} USD — ${transfer.description}`,
-            { chat_id: chatId, message_id: cq.message.message_id, parse_mode: 'HTML' }
-        ).catch(() => {});
+            { parse_mode: 'HTML' }
+        );
 
         if (transfer.customerChatId) {
             awaitingDelivery.set(chatId, { customerChatId: transfer.customerChatId, description: transfer.description });
@@ -878,7 +879,7 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
 
         if (!pending) {
             bot.answerCallbackQuery(cq.id, { text: '❌ Solicitud expirada.' });
-            return bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: cq.message.message_id }).catch(() => {});
+            return bot.deleteMessage(chatId, cq.message.message_id).catch(() => {});
         }
 
         bot.answerCallbackQuery(cq.id);
@@ -887,8 +888,7 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
         const showCatalogoBack  = !isAllowed(replyChatId);
         const panel = metodoPagoPanel(pendingId, amount, description, showCatalogoBack);
 
-        return bot.editMessageText(panel.text, { chat_id: chatId, message_id: cq.message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } })
-            .catch(() => bot.sendMessage(chatId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } }));
+        return replacePanel(chatId, cq.message.message_id, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
     }
 
     if (data.startsWith('pay_s_') || data.startsWith('pay_p_')) {
@@ -898,7 +898,7 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
 
         if (!pending) {
             bot.answerCallbackQuery(cq.id, { text: '❌ Solicitud expirada. Usa /cobrar de nuevo.' });
-            return bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: cq.message.chat.id, message_id: cq.message.message_id }).catch(() => {});
+            return bot.deleteMessage(chatId, cq.message.message_id).catch(() => {});
         }
 
         bot.answerCallbackQuery(cq.id, { text: '⏳ Generando link...' });
@@ -930,8 +930,7 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
             ] };
             const panelText = `💰 <b>$${parseFloat(amount).toFixed(2)} USD</b> — ${description}`;
 
-            await bot.editMessageText(panelText, { chat_id: replyChatId, message_id: cq.message.message_id, parse_mode: 'HTML', reply_markup: secureButton })
-                .catch(() => bot.sendMessage(replyChatId, panelText, { parse_mode: 'HTML', reply_markup: secureButton }));
+            await replacePanel(replyChatId, cq.message.message_id, panelText, { parse_mode: 'HTML', reply_markup: secureButton });
 
             // La notificación al admin se manda desde el webhook, una vez que el pago se confirma de verdad (ver más abajo).
 
@@ -943,8 +942,7 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
             }
         } catch (err) {
             const detail = err.response?.data?.error?.detail || err.message;
-            await bot.editMessageText(`❌ Error: ${detail}`, { chat_id: replyChatId, message_id: cq.message.message_id })
-                .catch(() => bot.sendMessage(replyChatId, `❌ Error: ${detail}`));
+            await replacePanel(replyChatId, cq.message.message_id, `❌ Error: ${detail}`, {});
         }
     }
 });
