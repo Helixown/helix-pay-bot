@@ -605,7 +605,7 @@ bot.on('message', (msg) => {
     // Comprobante (foto/documento/texto) del cliente -> reenviar a quien debe confirmar
     const awaitingProof = transferByCustomer.get(chatId);
     if (awaitingProof && !(msg.text && msg.text.startsWith('/'))) {
-        bot.forwardMessage(awaitingProof.operatorChatId, chatId, msg.message_id)
+        bot.copyMessage(awaitingProof.operatorChatId, chatId, msg.message_id)
             .catch(() => {})
             .then(() => bot.sendMessage(awaitingProof.operatorChatId, '📎 Comprobante recibido del cliente (arriba 👆)', {
                 reply_markup: { inline_keyboard: [[{ text: '✅ Confirmar pago recibido', callback_data: `confirm_transfer_${awaitingProof.transferId}` }]] }
