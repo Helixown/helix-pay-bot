@@ -121,8 +121,7 @@ function renderPayPage({ amount, description, method, url }) {
   if (tg) { tg.ready(); tg.expand(); }
   document.getElementById('go').addEventListener('click', () => {
     const url = ${JSON.stringify(url)};
-    if (tg && tg.openLink) { tg.openLink(url); }
-    else { window.location.href = url; }
+    window.location.href = url;
   });
 </script>
 </body>
