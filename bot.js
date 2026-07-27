@@ -33,7 +33,13 @@ async function getBotUsername() {
     return cachedBotUsername;
 }
 
-// Reemplaza un panel: manda el mensaje nuevo (abajo del chat) y borra el anterior, en vez de editarlo en su lugar
+// Navegación por botones: un solo panel fijo que se va editando en su lugar
+async function editOrSend(chatId, messageId, text, options = {}) {
+    return bot.editMessageText(text, { chat_id: chatId, message_id: messageId, ...options })
+        .catch(() => bot.sendMessage(chatId, text, options));
+}
+
+// Tras escribir texto (Promocionar, actualizar datos bancarios): borra el aviso viejo y manda la confirmación nueva abajo
 async function replacePanel(chatId, oldMessageId, text, options = {}) {
     const sent = await bot.sendMessage(chatId, text, options);
     if (oldMessageId) bot.deleteMessage(chatId, oldMessageId).catch(() => {});
@@ -145,7 +151,7 @@ function metodoPagoPanel(pendingId, amount, description, showCatalogoBack) {
 const awaitingCanalPost = new Map(); // chatId del operador -> message_id del panel a editar, mientras espera el texto para el canal
 
 // ── Transferencia MXN manual (in-memory) ─────────────────────────────────────
-const awaitingBankUpdate  = new Set(); // chatId del operador que va a enviar el texto para actualizar los datos bancarios
+const awaitingBankUpdate  = new Map(); // chatId del operador -> message_id del panel a borrar cuando llegue el texto para actualizar los datos bancarios
 const pendingTransfers    = new Map(); // transferId -> { customerChatId, amount, description, operatorChatId }
 const transferByCustomer  = new Map(); // customerChatId -> { transferId, operatorChatId }
 const awaitingDelivery    = new Map(); // chatId del operador -> { customerChatId, description }
@@ -363,7 +369,7 @@ bot.onText(/\/operadores/, (msg) => {
     bot.sendMessage(msg.chat.id, `👥 <b>Operadores activos:</b>\n${lista}`, { parse_mode: 'HTML' });
 });
 
-bot.onText(/\/datosbancarios(?:\s+([\s\S]+))?/, (msg, match) => {
+bot.onText(/\/datosbancarios(?:\s+([\s\S]+))?/, async (msg, match) => {
     if (!isAllowed(msg.chat.id)) return;
     const chatId = msg.chat.id;
     const inline = match[1] ? match[1].trim() : null;
@@ -374,13 +380,13 @@ bot.onText(/\/datosbancarios(?:\s+([\s\S]+))?/, (msg, match) => {
     }
 
     const current = loadBankDetails();
-    awaitingBankUpdate.add(chatId);
-    setTimeout(() => awaitingBankUpdate.delete(chatId), 30 * 60 * 1000);
-    bot.sendMessage(chatId,
+    const sent = await bot.sendMessage(chatId,
         (current ? `🏦 <b>Datos bancarios actuales:</b>\n\n${formatBankLines(current)}\n\n` : '🏦 Aún no hay datos bancarios configurados.\n\n') +
         'Envía en un solo mensaje los nuevos datos (CLABE, banco, titular) para actualizarlos.',
         { parse_mode: 'HTML' }
     );
+    awaitingBankUpdate.set(chatId, sent.message_id);
+    setTimeout(() => awaitingBankUpdate.delete(chatId), 30 * 60 * 1000);
 });
 
 bot.onText(/\/addproducto(?:\s+(.+))?/, (msg, match) => {
@@ -429,7 +435,7 @@ function sendTienda(chatId) {
 
 function editTienda(chatId, messageId) {
     const panel = tiendaPanel();
-    return replacePanel(chatId, messageId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
+    return editOrSend(chatId, messageId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
 }
 
 bot.onText(/\/tienda/, (msg) => {
@@ -609,7 +615,7 @@ function withBack(keyboard) {
 
 function editPanel(chatId, messageId, panel) {
     const keyboard = withBack(panel.keyboard);
-    return replacePanel(chatId, messageId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
+    return editOrSend(chatId, messageId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
 }
 
 bot.onText(/\/ventas/, (msg) => {
@@ -689,7 +695,7 @@ bot.on('callback_query', async (cq) => {
         if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
         bot.answerCallbackQuery(cq.id);
         const panel = operatorHomePanel(chatId === ADMIN_CHAT_ID);
-        return replacePanel(chatId, cq.message.message_id, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
+        return editOrSend(chatId, cq.message.message_id, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
     }
 
     if (data === 'panel_catalogo') {
@@ -719,20 +725,21 @@ bot.on('callback_query', async (cq) => {
     if (data === 'panel_banco_edit') {
         if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
         bot.answerCallbackQuery(cq.id);
-        awaitingBankUpdate.add(chatId);
-        setTimeout(() => awaitingBankUpdate.delete(chatId), 30 * 60 * 1000);
-        return replacePanel(chatId, cq.message.message_id, '✏️ Envía en un solo mensaje los nuevos datos bancarios (CLABE, banco, titular).',
+        const result = await editOrSend(chatId, cq.message.message_id, '✏️ Envía en un solo mensaje los nuevos datos bancarios (CLABE, banco, titular).',
             { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
         );
+        awaitingBankUpdate.set(chatId, result?.message_id || cq.message.message_id);
+        setTimeout(() => awaitingBankUpdate.delete(chatId), 30 * 60 * 1000);
+        return;
     }
 
     if (data === 'panel_promocionar') {
         if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
         bot.answerCallbackQuery(cq.id);
-        const sent = await replacePanel(chatId, cq.message.message_id, `📢 Envía el texto que quieres publicar en ${CHANNEL_ID}.`,
+        const result = await editOrSend(chatId, cq.message.message_id, `📢 Envía el texto que quieres publicar en ${CHANNEL_ID}.`,
             { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
         );
-        awaitingCanalPost.set(chatId, sent.message_id);
+        awaitingCanalPost.set(chatId, result?.message_id || cq.message.message_id);
         setTimeout(() => awaitingCanalPost.delete(chatId), 30 * 60 * 1000);
         return;
     }
@@ -743,12 +750,12 @@ bot.on('callback_query', async (cq) => {
         try {
             await bot.deleteMessage(CHANNEL_ID, canalMessageId);
             bot.answerCallbackQuery(cq.id, { text: '🗑️ Publicación borrada.' });
-            await replacePanel(chatId, cq.message.message_id, `🗑️ Publicación borrada de ${CHANNEL_ID}.`,
+            await editOrSend(chatId, cq.message.message_id, `🗑️ Publicación borrada de ${CHANNEL_ID}.`,
                 { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
             );
         } catch (err) {
             bot.answerCallbackQuery(cq.id, { text: '❌ No se pudo borrar.' });
-            await replacePanel(chatId, cq.message.message_id, `❌ No se pudo borrar la publicación: ${err.message}`,
+            await editOrSend(chatId, cq.message.message_id, `❌ No se pudo borrar la publicación: ${err.message}`,
                 { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
             );
         }
@@ -783,14 +790,14 @@ bot.on('callback_query', async (cq) => {
         sales.length = 0;
         fs.writeFileSync(SALES_FILE, JSON.stringify(sales, null, 2));
         bot.answerCallbackQuery(cq.id, { text: '✅ Contador reiniciado.' });
-        return replacePanel(chatId, cq.message.message_id, '✅ Contador de ventas reiniciado a 0.',
+        return editOrSend(chatId, cq.message.message_id, '✅ Contador de ventas reiniciado a 0.',
             { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
         );
     }
 
     if (data === 'reset_ventas_cancel') {
         bot.answerCallbackQuery(cq.id, { text: 'Cancelado.' });
-        return replacePanel(chatId, cq.message.message_id, '❌ Reinicio cancelado, el contador sigue igual.',
+        return editOrSend(chatId, cq.message.message_id, '❌ Reinicio cancelado, el contador sigue igual.',
             { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
         );
     }
@@ -804,7 +811,7 @@ bot.on('callback_query', async (cq) => {
         const pendingId = savePending(product.price, product.name, null, chatId);
         const panel     = metodoPagoPanel(pendingId, product.price, product.name, true);
 
-        return replacePanel(chatId, cq.message.message_id, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
+        return editOrSend(chatId, cq.message.message_id, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
     }
 
     if (data.startsWith('pay_t_')) {
@@ -813,7 +820,7 @@ bot.on('callback_query', async (cq) => {
 
         if (!pending) {
             bot.answerCallbackQuery(cq.id, { text: '❌ Solicitud expirada.' });
-            return bot.deleteMessage(chatId, cq.message.message_id).catch(() => {});
+            return editOrSend(chatId, cq.message.message_id, '❌ Solicitud expirada.', {});
         }
 
         const { amount, description, targetChatId, operatorChatId } = pending;
@@ -852,9 +859,9 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
 
         if (!customerChatId || chatId === customerChatId) {
             // no hay un chat de cliente distinto vinculado (o el que clickeó es el cliente): mostrar los datos aquí mismo
-            await replacePanel(chatId, cq.message.message_id, bankMsg, { parse_mode: 'HTML' });
+            await editOrSend(chatId, cq.message.message_id, bankMsg, { parse_mode: 'HTML' });
         } else {
-            await replacePanel(chatId, cq.message.message_id, '✅ Datos bancarios enviados al cliente. Te aviso cuando mande el comprobante.', {});
+            await editOrSend(chatId, cq.message.message_id, '✅ Datos bancarios enviados al cliente. Te aviso cuando mande el comprobante.', {});
             await bot.sendMessage(customerChatId, bankMsg, { parse_mode: 'HTML' }).catch(() => {});
         }
 
@@ -875,7 +882,7 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
         recordSale({ date: new Date().toISOString(), method: 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId });
 
         bot.answerCallbackQuery(cq.id, { text: '✅ Venta confirmada.' });
-        await replacePanel(chatId, cq.message.message_id,
+        await editOrSend(chatId, cq.message.message_id,
             `✅ <b>Pago confirmado</b>\n💰 $${parseFloat(transfer.amount).toFixed(2)} USD — ${transfer.description}`,
             { parse_mode: 'HTML' }
         );
@@ -896,7 +903,7 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
 
         if (!pending) {
             bot.answerCallbackQuery(cq.id, { text: '❌ Solicitud expirada.' });
-            return bot.deleteMessage(chatId, cq.message.message_id).catch(() => {});
+            return editOrSend(chatId, cq.message.message_id, '❌ Solicitud expirada.', {});
         }
 
         bot.answerCallbackQuery(cq.id);
@@ -905,7 +912,7 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
         const showCatalogoBack  = !isAllowed(replyChatId);
         const panel = metodoPagoPanel(pendingId, amount, description, showCatalogoBack);
 
-        return replacePanel(chatId, cq.message.message_id, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
+        return editOrSend(chatId, cq.message.message_id, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
     }
 
     if (data.startsWith('pay_s_') || data.startsWith('pay_p_')) {
@@ -915,7 +922,7 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
 
         if (!pending) {
             bot.answerCallbackQuery(cq.id, { text: '❌ Solicitud expirada. Usa /cobrar de nuevo.' });
-            return bot.deleteMessage(chatId, cq.message.message_id).catch(() => {});
+            return editOrSend(chatId, cq.message.message_id, '❌ Solicitud expirada. Usa /cobrar de nuevo.', {});
         }
 
         bot.answerCallbackQuery(cq.id, { text: '⏳ Generando link...' });
@@ -947,7 +954,7 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
             ] };
             const panelText = `💰 <b>$${parseFloat(amount).toFixed(2)} USD</b> — ${description}`;
 
-            await replacePanel(replyChatId, cq.message.message_id, panelText, { parse_mode: 'HTML', reply_markup: secureButton });
+            await editOrSend(replyChatId, cq.message.message_id, panelText, { parse_mode: 'HTML', reply_markup: secureButton });
 
             // La notificación al admin se manda desde el webhook, una vez que el pago se confirma de verdad (ver más abajo).
 
@@ -959,7 +966,7 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
             }
         } catch (err) {
             const detail = err.response?.data?.error?.detail || err.message;
-            await replacePanel(replyChatId, cq.message.message_id, `❌ Error: ${detail}`, {});
+            await editOrSend(replyChatId, cq.message.message_id, `❌ Error: ${detail}`, {});
         }
     }
 });
@@ -1046,11 +1053,12 @@ bot.on('message', async (msg) => {
         return;
     }
 
-    // Texto para actualizar los datos bancarios por defecto (tras /datosbancarios)
+    // Texto para actualizar los datos bancarios por defecto (tras /datosbancarios o el botón "✏️ Actualizar")
     if (awaitingBankUpdate.has(chatId)) {
+        const messageId = awaitingBankUpdate.get(chatId);
         awaitingBankUpdate.delete(chatId);
         saveBankDetails(msg.text);
-        bot.sendMessage(chatId, `✅ Datos bancarios actualizados.\n\n${formatBankLines(msg.text)}`, { parse_mode: 'HTML' });
+        await replacePanel(chatId, messageId, `✅ Datos bancarios actualizados.\n\n${formatBankLines(msg.text)}`, { parse_mode: 'HTML' });
         return;
     }
 });
