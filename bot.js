@@ -459,6 +459,20 @@ bot.onText(/\/promocanal(?:\s+([\s\S]+))?/, (msg, match) => {
     postToChannel(msg.chat.id, match[1] || '');
 });
 
+bot.onText(/\/borrarcanal(?:\s+(\d+))?/, async (msg, match) => {
+    if (!isAllowed(msg.chat.id)) return;
+    const messageId = match[1];
+    if (!messageId) {
+        return bot.sendMessage(msg.chat.id, `❌ Uso: /borrarcanal <id_del_mensaje>\nEl id es el número al final del link de la publicación en ${CHANNEL_ID} (ej. t.me/${CHANNEL_ID.replace('@', '')}/<b>45</b> -> 45).`, { parse_mode: 'HTML' });
+    }
+    try {
+        await bot.deleteMessage(CHANNEL_ID, messageId);
+        bot.sendMessage(msg.chat.id, `🗑️ Publicación <code>${messageId}</code> borrada de ${CHANNEL_ID}.`, { parse_mode: 'HTML' });
+    } catch (err) {
+        bot.sendMessage(msg.chat.id, `❌ No se pudo borrar: ${err.message}`);
+    }
+});
+
 function ventasPanel() {
     if (!sales.length) return { text: '📊 Aún no hay ventas registradas.', keyboard: [] };
     const total = sales.reduce((sum, s) => sum + s.amount, 0);
@@ -546,6 +560,7 @@ ${stripe ? '✅' : '❌'} Stripe (tarjeta)
 
 <b>Promoción:</b>
 /promocanal <code>[texto]</code> — publica en ${CHANNEL_ID}
+/borrarcanal <code>&lt;id_del_mensaje&gt;</code> — borra una publicación vieja
 
 <b>Ventas:</b>
 /ventas
