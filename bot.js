@@ -24,7 +24,14 @@ const stripe = STRIPE_SECRET_KEY ? Stripe(STRIPE_SECRET_KEY) : null;
 bot.setMyCommands([{ command: 'start', description: 'Iniciar' }]).catch(() => {});
 
 // ── Operadores ────────────────────────────────────────────────────────────────
-const operadores = new Set([ADMIN_CHAT_ID]);
+const OPERATORS_FILE = process.env.OPERATORS_FILE || path.join(__dirname, 'operators.json');
+function loadOperadores() {
+    try { return new Set(JSON.parse(fs.readFileSync(OPERATORS_FILE, 'utf8'))); }
+    catch { return new Set(); }
+}
+const operadores = loadOperadores();
+operadores.add(ADMIN_CHAT_ID);
+function saveOperadores() { fs.writeFileSync(OPERATORS_FILE, JSON.stringify([...operadores])); }
 function isAllowed(chatId) { return operadores.has(chatId); }
 
 // ── Catálogo de productos ─────────────────────────────────────────────────────
@@ -208,6 +215,7 @@ bot.onText(/\/addoperador(?:\s+(\d+))?/, (msg, match) => {
     const id = parseInt(match[1]);
     if (!id) return bot.sendMessage(msg.chat.id, '❌ Uso: /addoperador <chatId>');
     operadores.add(id);
+    saveOperadores();
     bot.sendMessage(msg.chat.id, `✅ Operador <code>${id}</code> agregado.`, { parse_mode: 'HTML' });
 });
 
@@ -217,6 +225,7 @@ bot.onText(/\/removeoperador(?:\s+(\d+))?/, (msg, match) => {
     if (!id) return bot.sendMessage(msg.chat.id, '❌ Uso: /removeoperador <chatId>');
     if (id === ADMIN_CHAT_ID) return bot.sendMessage(msg.chat.id, '❌ No puedes removerte a ti mismo.');
     operadores.delete(id);
+    saveOperadores();
     bot.sendMessage(msg.chat.id, `✅ Operador <code>${id}</code> removido.`, { parse_mode: 'HTML' });
 });
 
@@ -412,10 +421,8 @@ Selecciona método de pago:`,
 ━━━━━━━━━━━━━━
 💰 <b>Monto:</b> $${parseFloat(amount).toFixed(2)} USD
 📝 <b>Descripción:</b> ${description}
-🔖 <b>ID:</b> <code>${txId}</code>
-
-🔗 ${url}`,
-                { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: secureButton }
+🔖 <b>ID:</b> <code>${txId}</code>`,
+                { parse_mode: 'HTML', reply_markup: secureButton }
             );
 
             if (replyChatId !== ADMIN_CHAT_ID) {
@@ -436,10 +443,8 @@ Selecciona método de pago:`,
 `💳 <b>Link de pago</b>
 ━━━━━━━━━━━━━━
 💰 <b>Monto:</b> $${parseFloat(amount).toFixed(2)} USD
-📝 ${description}
-
-🔗 ${url}`,
-                    { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: secureButton }
+📝 ${description}`,
+                    { parse_mode: 'HTML', reply_markup: secureButton }
                 ).catch(() => bot.sendMessage(replyChatId, `⚠️ No se pudo enviar al cliente (${targetChatId}). Reenvía tú el link.`));
             }
         } catch (err) {
