@@ -74,9 +74,19 @@ function formatBankLines(text) {
 
 // Descripción de cada checkout generado, para poder registrar la venta cuando llegue el webhook
 const checkoutMeta = new Map();
-function saveCheckoutMeta(txId, description) {
-    checkoutMeta.set(txId, description);
+function saveCheckoutMeta(txId, meta) {
+    checkoutMeta.set(txId, meta);
     setTimeout(() => checkoutMeta.delete(txId), 24 * 60 * 60 * 1000);
+}
+
+// Tras confirmarse un pago (Stripe/Paddle), pide la cuenta a entregar igual que en transferencia MXN
+function triggerDelivery(txId, description) {
+    const meta = checkoutMeta.get(txId);
+    if (!meta || !meta.customerChatId) return;
+    const { customerChatId, askChatId } = meta;
+    awaitingDelivery.set(askChatId, { customerChatId, description });
+    setTimeout(() => awaitingDelivery.delete(askChatId), 30 * 60 * 1000);
+    bot.sendMessage(askChatId, '✏️ Pago confirmado — escribe la cuenta a entregar (formato correo:contraseña).').catch(() => {});
 }
 
 // ── Pending payments (in-memory) ─────────────────────────────────────────────
@@ -714,12 +724,13 @@ ${formatBankLines(bankText)}
 
 Envía la foto de tu comprobante aquí una vez hecho el pago.`;
 
-        if (chatId === customerChatId) {
+        if (!customerChatId || chatId === customerChatId) {
+            // no hay un chat de cliente distinto vinculado (o el que clickeó es el cliente): mostrar los datos aquí mismo
             await bot.editMessageText(bankMsg, { chat_id: chatId, message_id: cq.message.message_id, parse_mode: 'HTML' })
                 .catch(() => bot.sendMessage(chatId, bankMsg, { parse_mode: 'HTML' }));
         } else {
             await bot.editMessageText('✅ Datos bancarios enviados al cliente. Te aviso cuando mande el comprobante.', { chat_id: chatId, message_id: cq.message.message_id }).catch(() => {});
-            if (customerChatId) await bot.sendMessage(customerChatId, bankMsg, { parse_mode: 'HTML' }).catch(() => {});
+            await bot.sendMessage(customerChatId, bankMsg, { parse_mode: 'HTML' }).catch(() => {});
         }
 
         if (askChatId !== chatId && askChatId !== customerChatId) {
@@ -786,7 +797,10 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
         bot.answerCallbackQuery(cq.id, { text: '⏳ Generando link...' });
 
         const { amount, description, targetChatId, operatorChatId } = pending;
-        const replyChatId = operatorChatId || ADMIN_CHAT_ID;
+        const replyChatId    = operatorChatId || ADMIN_CHAT_ID;
+        const fromOperator    = isAllowed(replyChatId);
+        const customerChatId  = fromOperator ? targetChatId : replyChatId;
+        const askChatId       = fromOperator ? replyChatId : ADMIN_CHAT_ID;
 
         try {
             let url, txId;
@@ -800,7 +814,7 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
                 txId = tx.id;
             }
 
-            saveCheckoutMeta(txId, description);
+            saveCheckoutMeta(txId, { description, customerChatId, askChatId });
             const linkId      = saveLink({ amount, description, method, url });
             const payPageUrl  = `${APP_BASE_URL}/pay/${linkId}`;
             const secureButton = { inline_keyboard: [
@@ -941,6 +955,7 @@ app.post('/webhook/paddle', (req, res) => {
             { parse_mode: 'HTML' }
         ).catch(() => {});
         if (amount) recordSale({ date: new Date().toISOString(), method: 'paddle', amount, currency, description, txId: tx.id });
+        triggerDelivery(tx.id, description);
     }
     res.status(200).send('OK');
 });
@@ -964,7 +979,7 @@ app.post('/webhook/stripe', (req, res) => {
         const session     = event.data.object;
         const amount      = session.amount_total ? session.amount_total / 100 : null;
         const currency    = (session.currency || 'usd').toUpperCase();
-        const description = checkoutMeta.get(session.id) || 'Pedido';
+        const description = checkoutMeta.get(session.id)?.description || 'Pedido';
         bot.sendMessage(ADMIN_CHAT_ID,
 `💰 <b>¡Pago recibido! (Stripe)</b>
 ━━━━━━━━━━━━━━
@@ -975,6 +990,7 @@ app.post('/webhook/stripe', (req, res) => {
             { parse_mode: 'HTML' }
         ).catch(() => {});
         if (amount) recordSale({ date: new Date().toISOString(), method: 'stripe', amount, currency, description, txId: session.id });
+        triggerDelivery(session.id, description);
     }
     res.status(200).send('OK');
 });
