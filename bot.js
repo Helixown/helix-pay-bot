@@ -232,8 +232,22 @@ function loadSupportThreads() {
     try { return new Map(Object.entries(JSON.parse(fs.readFileSync(SUPPORT_FILE, 'utf8')))); }
     catch { return new Map(); }
 }
-const supportThreads = loadSupportThreads(); // chatId del cliente (string) -> { name, lastMessage, lastAt }
+const supportThreads = loadSupportThreads(); // chatId del cliente (string) -> { name, lastMessage, lastAt, messages: [{from, text, at}] }
 function persistSupportThreads() { fs.writeFileSync(SUPPORT_FILE, JSON.stringify(Object.fromEntries(supportThreads))); }
+
+// Agrega un mensaje al historial del hilo (para el chat de la mini app); si no existe el hilo, no hace nada (solo aplica a hilos ya abiertos por el cliente)
+function pushSupportMessage(customerId, from, text, name) {
+    const key = String(customerId);
+    const entry = supportThreads.get(key) || { name: name || 'Cliente', messages: [] };
+    if (name) entry.name = name;
+    entry.messages = entry.messages || [];
+    entry.messages.push({ from, text, at: Date.now() });
+    if (entry.messages.length > 200) entry.messages = entry.messages.slice(-200);
+    entry.lastMessage = text;
+    entry.lastAt = Date.now();
+    supportThreads.set(key, entry);
+    persistSupportThreads();
+}
 
 function setSupportReplyTo(operatorId, customerId) {
     awaitingSupportReplyTo.set(operatorId, customerId);
@@ -884,7 +898,7 @@ Elige una opción:`;
         [{ text: '🛒 Catálogo', callback_data: 'panel_catalogo' }, { text: '📊 Ventas', callback_data: 'panel_ventas' }],
         [{ text: '💰 Cobrar', callback_data: 'panel_cobrar' }, { text: '💳 Métodos de pago', callback_data: 'panel_metodos' }],
         [{ text: storeOpen ? '🟢 Tienda: Abierta' : '🔴 Tienda: Cerrada', callback_data: 'toggle_store' }],
-        [{ text: `💬 Soporte${supportThreads.size ? ` (${supportThreads.size})` : ''}`, callback_data: 'panel_soporte' }],
+        [{ text: `💬 Soporte${supportThreads.size ? ` (${supportThreads.size})` : ''}`, callback_data: 'panel_soporte' }, { text: '🧪 Soporte (mini app)', web_app: { url: `${APP_BASE_URL}/support` } }],
         [{ text: '📢 Promocionar', callback_data: 'panel_promocionar' }]
     ];
     if (isAdmin) keyboard.push([{ text: '👥 Operadores', callback_data: 'panel_operadores' }]);
@@ -1407,7 +1421,10 @@ bot.on('message', async (msg) => {
         const supportCustomerId = supportMessages.get(`${chatId}:${msg.reply_to_message.message_id}`);
         if (supportCustomerId) {
             bot.copyMessage(supportCustomerId, chatId, msg.message_id)
-                .then(() => bot.sendMessage(chatId, '✅ Respuesta enviada al cliente.'))
+                .then(() => {
+                    pushSupportMessage(supportCustomerId, 'operator', msg.text || '📎 [archivo/foto]');
+                    return bot.sendMessage(chatId, '✅ Respuesta enviada al cliente.');
+                })
                 .catch(() => bot.sendMessage(chatId, '⚠️ No se pudo enviar la respuesta al cliente.'));
             return;
         }
@@ -1468,12 +1485,7 @@ bot.on('message', async (msg) => {
     // Mensaje del cliente con soporte abierto -> reenviar a todos los operadores
     if (openSupportChats.has(chatId) && !isAllowed(chatId) && !(msg.text && msg.text.startsWith('/'))) {
         const who = msg.from?.username ? '@' + msg.from.username : (msg.from?.first_name || 'Cliente');
-        supportThreads.set(String(chatId), {
-            name: who,
-            lastMessage: msg.text ? msg.text.slice(0, 80) : '📎 [archivo/foto]',
-            lastAt: Date.now()
-        });
-        persistSupportThreads();
+        pushSupportMessage(chatId, 'customer', msg.text || '📎 [archivo/foto]', who);
         for (const opId of operadores) {
             const alreadyOpen = awaitingSupportReplyTo.get(opId) === chatId;
             if (alreadyOpen) {
@@ -1520,7 +1532,10 @@ bot.on('message', async (msg) => {
         const customerId = awaitingSupportReplyTo.get(chatId);
         setSupportReplyTo(chatId, customerId); // renueva el tiempo de espera
         bot.copyMessage(customerId, chatId, msg.message_id)
-            .then(() => bot.sendMessage(chatId, '✅ Enviado al cliente.'))
+            .then(() => {
+                pushSupportMessage(customerId, 'operator', msg.text || '📎 [archivo/foto]');
+                return bot.sendMessage(chatId, '✅ Enviado al cliente.');
+            })
             .catch(() => bot.sendMessage(chatId, '⚠️ No se pudo enviar al cliente.'));
         return;
     }
@@ -1618,7 +1633,275 @@ app.get('/pay/:id', (req, res) => {
     res.send(renderPayPage(data));
 });
 
+// ── Mini app de soporte (prueba) ───────────────────────────────────────────────
+function renderSupportApp() {
+    return `<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Soporte</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--tg-theme-bg-color, #ffffff);
+    color: var(--tg-theme-text-color, #111111);
+    display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 14px; border-bottom: 1px solid var(--tg-theme-secondary-bg-color, #e5e5ea);
+    flex-shrink: 0;
+  }
+  header h1 { font-size: 17px; margin: 0; flex: 1; }
+  button.icon {
+    border: none; background: var(--tg-theme-secondary-bg-color, #f2f2f7);
+    color: var(--tg-theme-text-color, #111111); border-radius: 10px;
+    padding: 8px 12px; font-size: 14px; cursor: pointer;
+  }
+  #list { flex: 1; overflow-y: auto; padding: 8px; }
+  .empty { text-align: center; opacity: .6; margin-top: 40px; font-size: 14px; }
+  .thread {
+    display: flex; flex-direction: column; gap: 3px;
+    padding: 12px; margin-bottom: 8px; border-radius: 12px;
+    background: var(--tg-theme-secondary-bg-color, #f2f2f7);
+    cursor: pointer;
+  }
+  .thread .name { font-weight: 600; font-size: 15px; }
+  .thread .preview { font-size: 13px; opacity: .7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .thread .time { font-size: 11px; opacity: .5; align-self: flex-end; }
+  #chat { flex: 1; display: none; flex-direction: column; overflow: hidden; }
+  #messages { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .bubble { max-width: 78%; padding: 9px 12px; border-radius: 14px; font-size: 14px; line-height: 1.35; white-space: pre-wrap; word-break: break-word; }
+  .bubble.customer { align-self: flex-start; background: var(--tg-theme-secondary-bg-color, #f2f2f7); border-bottom-left-radius: 4px; }
+  .bubble.operator { align-self: flex-end; background: var(--tg-theme-button-color, #2ea6ff); color: var(--tg-theme-button-text-color, #ffffff); border-bottom-right-radius: 4px; }
+  .bubble .t { display: block; font-size: 10px; opacity: .6; margin-top: 3px; }
+  #composer { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--tg-theme-secondary-bg-color, #e5e5ea); flex-shrink: 0; }
+  #composer input {
+    flex: 1; border: 1px solid var(--tg-theme-secondary-bg-color, #e5e5ea); border-radius: 20px;
+    padding: 10px 14px; font-size: 14px; background: var(--tg-theme-bg-color, #fff); color: inherit;
+  }
+  #composer button {
+    border: none; background: var(--tg-theme-button-color, #2ea6ff); color: var(--tg-theme-button-text-color, #fff);
+    border-radius: 20px; padding: 0 18px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  .err { padding: 30px 16px; text-align: center; opacity: .7; font-size: 14px; }
+</style>
+</head>
+<body>
+  <header>
+    <button class="icon" id="backBtn" style="display:none">⬅️</button>
+    <h1 id="title">💬 Soporte</h1>
+    <button class="icon" id="resolveBtn" style="display:none">✅ Resuelto</button>
+  </header>
+  <div id="list"><div class="empty">Cargando…</div></div>
+  <div id="chat">
+    <div id="messages"></div>
+    <div id="composer">
+      <input id="input" type="text" placeholder="Escribe tu respuesta…" />
+      <button id="sendBtn">Enviar</button>
+    </div>
+  </div>
+
+<script>
+  const tg = window.Telegram?.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+  const initData = tg?.initData || '';
+
+  const listEl    = document.getElementById('list');
+  const chatEl     = document.getElementById('chat');
+  const messagesEl = document.getElementById('messages');
+  const titleEl    = document.getElementById('title');
+  const backBtn    = document.getElementById('backBtn');
+  const resolveBtn = document.getElementById('resolveBtn');
+  const input      = document.getElementById('input');
+  const sendBtn    = document.getElementById('sendBtn');
+
+  let currentId = null;
+  let pollTimer = null;
+
+  async function api(path, options = {}) {
+    const res = await fetch(path, {
+      ...options,
+      headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData, ...(options.headers || {}) }
+    });
+    if (res.status === 401) throw new Error('unauthorized');
+    return res.json();
+  }
+
+  function timeAgo(ts) {
+    const diff = Math.max(0, Date.now() - ts);
+    const min = Math.floor(diff / 60000);
+    if (min < 1) return 'ahora';
+    if (min < 60) return min + 'm';
+    const h = Math.floor(min / 60);
+    if (h < 24) return h + 'h';
+    return Math.floor(h / 24) + 'd';
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  }
+
+  async function loadList() {
+    try {
+      const threads = await api('/support/api/threads');
+      if (!threads.length) { listEl.innerHTML = '<div class="empty">No hay conversaciones abiertas.</div>'; return; }
+      listEl.innerHTML = threads.map(t => \`
+        <div class="thread" data-id="\${t.id}">
+          <div class="name">👤 \${esc(t.name)}</div>
+          <div class="preview">\${esc(t.lastMessage || '')}</div>
+          <div class="time">\${timeAgo(t.lastAt)}</div>
+        </div>\`).join('');
+      listEl.querySelectorAll('.thread').forEach(el => {
+        el.addEventListener('click', () => openThread(el.dataset.id));
+      });
+    } catch (err) {
+      listEl.innerHTML = '<div class="err">No se pudo cargar (' + err.message + ').</div>';
+    }
+  }
+
+  function renderMessages(msgs) {
+    messagesEl.innerHTML = msgs.map(m => \`
+      <div class="bubble \${m.from}">\${esc(m.text)}<span class="t">\${new Date(m.at).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}</span></div>
+    \`).join('');
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  async function openThread(id) {
+    currentId = id;
+    listEl.style.display = 'none';
+    chatEl.style.display = 'flex';
+    backBtn.style.display = 'inline-block';
+    resolveBtn.style.display = 'inline-block';
+    await refreshThread();
+    clearInterval(pollTimer);
+    pollTimer = setInterval(refreshThread, 3000);
+  }
+
+  async function refreshThread() {
+    if (!currentId) return;
+    try {
+      const t = await api('/support/api/thread/' + currentId);
+      titleEl.textContent = '👤 ' + t.name;
+      renderMessages(t.messages || []);
+    } catch (err) {
+      titleEl.textContent = '💬 Soporte';
+    }
+  }
+
+  function goBack() {
+    currentId = null;
+    clearInterval(pollTimer);
+    chatEl.style.display = 'none';
+    backBtn.style.display = 'none';
+    resolveBtn.style.display = 'none';
+    titleEl.textContent = '💬 Soporte';
+    listEl.style.display = 'block';
+    loadList();
+  }
+
+  backBtn.addEventListener('click', goBack);
+
+  resolveBtn.addEventListener('click', async () => {
+    if (!currentId) return;
+    await api('/support/api/thread/' + currentId + '/resolve', { method: 'POST' });
+    goBack();
+  });
+
+  async function send() {
+    const text = input.value.trim();
+    if (!text || !currentId) return;
+    input.value = '';
+    await api('/support/api/thread/' + currentId + '/reply', { method: 'POST', body: JSON.stringify({ text }) });
+    refreshThread();
+  }
+
+  sendBtn.addEventListener('click', send);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
+
+  loadList();
+  setInterval(() => { if (!currentId) loadList(); }, 5000);
+</script>
+</body>
+</html>`;
+}
+
+// Valida el initData que manda Telegram Web App, per el algoritmo oficial de Telegram
+function verifyTelegramWebAppData(initData) {
+    try {
+        const params = new URLSearchParams(initData);
+        const hash = params.get('hash');
+        if (!hash) return null;
+        params.delete('hash');
+        const pairs = [...params.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([k, v]) => `${k}=${v}`);
+        const dataCheckString = pairs.join('\n');
+        const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+        const computedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+        if (computedHash !== hash) return null;
+        const userJson = params.get('user');
+        if (!userJson) return null;
+        return JSON.parse(userJson);
+    } catch {
+        return null;
+    }
+}
+
+function requireOperatorAuth(req, res, next) {
+    const user = verifyTelegramWebAppData(req.headers['x-telegram-init-data'] || '');
+    if (!user || !isAllowed(user.id)) return res.status(401).json({ error: 'No autorizado' });
+    req.operator = user;
+    next();
+}
+
 app.use(express.json());
+
+app.get('/support', (_req, res) => res.send(renderSupportApp()));
+
+app.get('/support/api/threads', requireOperatorAuth, (_req, res) => {
+    const list = [...supportThreads.entries()].map(([id, t]) => ({
+        id, name: t.name, lastMessage: t.lastMessage, lastAt: t.lastAt
+    })).sort((a, b) => b.lastAt - a.lastAt);
+    res.json(list);
+});
+
+app.get('/support/api/thread/:id', requireOperatorAuth, (req, res) => {
+    const t = supportThreads.get(req.params.id);
+    if (!t) return res.status(404).json({ error: 'No encontrado' });
+    res.json({ id: req.params.id, name: t.name, messages: t.messages || [] });
+});
+
+app.post('/support/api/thread/:id/reply', requireOperatorAuth, async (req, res) => {
+    const customerId = parseInt(req.params.id, 10);
+    const text = String(req.body?.text || '').trim();
+    if (!text) return res.status(400).json({ error: 'Mensaje vacío' });
+    try {
+        await bot.sendMessage(customerId, text);
+    } catch (err) {
+        return res.status(502).json({ error: err.message });
+    }
+    pushSupportMessage(customerId, 'operator', text);
+    res.json({ ok: true });
+});
+
+app.post('/support/api/thread/:id/resolve', requireOperatorAuth, (req, res) => {
+    const custId = req.params.id;
+    supportThreads.delete(custId);
+    persistSupportThreads();
+    openSupportChats.delete(parseInt(custId, 10));
+    for (const [opId, cId] of awaitingSupportReplyTo) {
+        if (String(cId) === custId) awaitingSupportReplyTo.delete(opId);
+    }
+    bot.sendMessage(parseInt(custId, 10), 'Tu conversación con soporte se marcó como resuelta. Si necesitas algo más, toca "💬 Contactar soporte" de nuevo.', {
+        reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'customer_home' }]] }
+    }).catch(() => {});
+    res.json({ ok: true });
+});
+
 app.get('/health',  (_req, res) => res.send('OK'));
 app.get('/success', (_req, res) => res.send('<h2>✅ Pago completado. Gracias por tu compra.</h2>'));
 app.get('/cancel',  (_req, res) => res.send('<h2>❌ Pago cancelado.</h2>'));
