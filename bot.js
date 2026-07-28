@@ -246,6 +246,14 @@ function setSupportReplyTo(operatorId, customerId) {
 // Persistido en disco para sobrevivir a reinicios entre que se manda el cobro y se confirma/entrega
 const awaitingMethodUpdate = new Map(); // chatId del operador -> { key, messageId } mientras espera el texto para actualizar un método de pago
 
+// Un operador solo puede tener UNA acción de "espera el próximo texto" activa a la vez,
+// para que no se mezcle (ej. escribir para soporte se interprete como texto para el canal)
+function clearAwaitingTextStates(chatId) {
+    awaitingCanalPost.delete(chatId);
+    awaitingMethodUpdate.delete(chatId);
+    awaitingSupportReplyTo.delete(chatId);
+}
+
 const TRANSFERS_FILE = process.env.TRANSFERS_FILE || path.join(__dirname, 'transfers.json');
 function loadTransfersState() {
     try {
@@ -511,6 +519,7 @@ bot.onText(/\/datosbancarios(?:\s+([\s\S]+))?/, async (msg, match) => {
         'Envía en un solo mensaje los nuevos datos (CLABE, banco, titular) para actualizarlos.',
         { parse_mode: 'HTML' }
     );
+    clearAwaitingTextStates(chatId);
     awaitingMethodUpdate.set(chatId, { key: 'mxn', messageId: sent.message_id });
     setTimeout(() => awaitingMethodUpdate.delete(chatId), 30 * 60 * 1000);
 });
@@ -1007,6 +1016,7 @@ bot.on('callback_query', async (cq) => {
         const result = await editOrSend(chatId, cq.message.message_id, `✏️ Envía en un solo mensaje los nuevos datos para ${cfg.label}.`,
             { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
         );
+        clearAwaitingTextStates(chatId);
         awaitingMethodUpdate.set(chatId, { key, messageId: result?.message_id || cq.message.message_id });
         setTimeout(() => awaitingMethodUpdate.delete(chatId), 30 * 60 * 1000);
         return;
@@ -1026,6 +1036,7 @@ bot.on('callback_query', async (cq) => {
         const result = await editOrSend(chatId, cq.message.message_id, `📢 Envía el texto que quieres publicar (se manda a ${chCount} canal${chCount > 1 ? 'es' : ''}).`,
             { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
         );
+        clearAwaitingTextStates(chatId);
         awaitingCanalPost.set(chatId, result?.message_id || cq.message.message_id);
         setTimeout(() => awaitingCanalPost.delete(chatId), 30 * 60 * 1000);
         return;
@@ -1072,6 +1083,7 @@ bot.on('callback_query', async (cq) => {
             return editPanel(chatId, cq.message.message_id, soportePanel());
         }
         bot.answerCallbackQuery(cq.id);
+        clearAwaitingTextStates(chatId);
         setSupportReplyTo(chatId, parseInt(custId, 10));
         return editPanel(chatId, cq.message.message_id, soporteHiloPanel(custId));
     }
