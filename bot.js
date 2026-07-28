@@ -1810,7 +1810,7 @@ function renderDashboardApp() {
         <button class="tile" data-v="sales">📊<div>Ventas</div></button>
         <button class="tile" data-v="methods">💳<div>Métodos</div></button>
         <button class="tile" data-v="clients">💬<div>Soporte</div></button>
-        <button class="tile" data-v="orders">📦<div>Pedidos</div></button>
+        <button class="tile" data-v="orders">🧾<div>Pedidos</div></button>
         <button class="tile" data-v="channels">📢<div>Canales</div></button>
         <button class="tile" data-v="charge">💰<div>Cobrar</div></button>
         <button class="tile" id="storeTile">…</button>
@@ -1955,22 +1955,34 @@ function renderDashboardApp() {
   async function renderOrders() {
     stopPolls();
     currentView = 'orders';
-    setHeader('📦 Pedidos', true);
+    setHeader('🧾 Pedidos', true);
     app.innerHTML = '<div class="empty">Cargando…</div>';
     await loadClientsList(t => t.pendingDelivery || t.pendingConfirm, 'No hay pedidos pendientes.');
     listPoll = setInterval(() => { if (currentView === 'orders') loadClientsList(t => t.pendingDelivery || t.pendingConfirm, 'No hay pedidos pendientes.'); }, 5000);
   }
 
   async function loadClientsList(filterFn, emptyMsg) {
+    const showDelete = currentView === 'orders';
     try {
       const threads = (await api('/support/api/threads')).filter(filterFn);
       if (!threads.length) { app.innerHTML = '<div class="empty">' + esc(emptyMsg) + '</div>'; return; }
       app.innerHTML = threads.map(t => \`
         <div class="row thread" data-id="\${t.id}">
-          <div class="row-main"><b>👤 \${esc(t.name)}</b>\${t.pendingConfirm ? '<span class="badge">💳 confirmar</span>' : ''}\${t.pendingDelivery ? '<span class="badge">📦 entregar</span>' : ''}</div>
+          <div class="row-main"><b>👤 \${esc(t.name)}</b>\${t.pendingConfirm ? '<span class="badge">💳 confirmar</span>' : ''}\${t.pendingDelivery ? '<span class="badge">📦 entregar</span>' : ''}\${showDelete ? '<button class="del" data-id="' + t.id + '">🗑️</button>' : ''}</div>
           <span class="sub">\${esc(t.lastMessage || '')} · \${timeAgo(t.lastAt)}</span>
         </div>\`).join('');
-      app.querySelectorAll('.thread').forEach(el => el.addEventListener('click', () => openClientChat(el.dataset.id, currentView)));
+      app.querySelectorAll('.thread').forEach(el => el.addEventListener('click', (e) => {
+        if (e.target.classList.contains('del')) return;
+        openClientChat(el.dataset.id, currentView);
+      }));
+      if (showDelete) {
+        app.querySelectorAll('.del').forEach(btn => btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (!confirm('¿Eliminar este pedido pendiente?')) return;
+          try { await api('/support/api/order/' + btn.dataset.id, { method: 'DELETE' }); loadClientsList(filterFn, emptyMsg); }
+          catch (err) { alert(err.message); }
+        }));
+      }
     } catch (err) { app.innerHTML = '<div class="err">' + esc(err.message) + '</div>'; }
   }
 
@@ -2328,6 +2340,20 @@ app.post('/support/api/thread/:id/resolve', requireOperatorAuth, (req, res) => {
     bot.sendMessage(parseInt(custId, 10), 'Tu conversación con soporte se marcó como resuelta. Si necesitas algo más, toca "💬 Contactar soporte" de nuevo.', {
         reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'customer_home' }]] }
     }).catch(() => {});
+    res.json({ ok: true });
+});
+
+// Elimina un pedido pendiente (pago por confirmar y/o cuenta por entregar) sin notificar al cliente
+app.delete('/support/api/order/:id', requireOperatorAuth, (req, res) => {
+    const customerId = parseInt(req.params.id, 10);
+    for (const [transferId, t] of [...pendingTransfers.entries()]) {
+        if (t.customerChatId === customerId) pendingTransfers.delete(transferId);
+    }
+    transferByCustomer.delete(customerId);
+    for (const [opId, d] of [...awaitingDelivery.entries()]) {
+        if (d.customerChatId === customerId) awaitingDelivery.delete(opId);
+    }
+    persistTransfersState();
     res.json({ ok: true });
 });
 
