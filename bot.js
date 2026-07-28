@@ -786,7 +786,7 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
         if (transfer.customerChatId) transferByCustomer.delete(transfer.customerChatId);
         persistTransfersState();
         const methodLabel = PAYMENT_METHODS[transfer.method]?.label || '🏧 Transferencia MXN';
-        recordSale({ date: new Date().toISOString(), method: transfer.method || 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId });
+        recordSale({ date: new Date().toISOString(), method: transfer.method || 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId, customerChatId: transfer.customerChatId || null });
 
         bot.answerCallbackQuery(cq.id, { text: '✅ Venta confirmada.' });
         await editOrSend(chatId, cq.message.message_id,
@@ -901,7 +901,7 @@ bot.on('message', async (msg) => {
             if (transfer.customerChatId) transferByCustomer.delete(transfer.customerChatId);
             persistTransfersState();
             const methodLabel = PAYMENT_METHODS[transfer.method]?.label || '🏧 Transferencia MXN';
-            recordSale({ date: new Date().toISOString(), method: transfer.method || 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId });
+            recordSale({ date: new Date().toISOString(), method: transfer.method || 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId, customerChatId: transfer.customerChatId || null });
             notifyAllOperators(
                 `✅ ${methodLabel} confirmada y entregada por otro operador — $${parseFloat(transfer.amount).toFixed(2)} USD — ${transfer.description}`,
                 {},
@@ -1075,7 +1075,7 @@ app.post('/webhook/paddle', (req, res) => {
 📝 ${description}
 🔖 <code>${tx.id}</code>`
         );
-        if (amount) recordSale({ date: new Date().toISOString(), method: 'paddle', amount, currency, description, txId: tx.id });
+        if (amount) recordSale({ date: new Date().toISOString(), method: 'paddle', amount, currency, description, txId: tx.id, customerChatId: checkoutMeta.get(tx.id)?.customerChatId || null });
         triggerDelivery(tx.id, description);
     }
     res.status(200).send('OK');
@@ -1117,7 +1117,7 @@ app.post('/webhook/stripe', (req, res) => {
 📝 ${description}
 🔖 <code>${session.id}</code>`
         );
-        if (amount) recordSale({ date: new Date().toISOString(), method: 'stripe', amount, currency, description, txId: session.id });
+        if (amount) recordSale({ date: new Date().toISOString(), method: 'stripe', amount, currency, description, txId: session.id, customerChatId: checkoutMeta.get(session.id)?.customerChatId || null });
         triggerDelivery(session.id, description);
     }
     res.status(200).send('OK');
@@ -1481,6 +1481,8 @@ function renderDashboardApp() {
     deliverBoxSig = null;
     setHeader('💬 …', true);
     app.innerHTML = \`
+      <button id="deliveriesBtn" class="secondary-btn">📦 Ver cuentas entregadas</button>
+      <div id="deliveriesBox"></div>
       <div id="deliverBox"></div>
       <div id="chatSection" style="display:none">
         <div id="messages"></div>
@@ -1496,8 +1498,25 @@ function renderDashboardApp() {
       try { await api('/support/api/thread/' + chatCustomerId + '/resolve', { method: 'POST' }); (chatOrigin === 'orders' ? renderOrders : renderClients)(); }
       catch (err) { alert(err.message); }
     });
+    document.getElementById('deliveriesBtn').addEventListener('click', toggleDeliveries);
     await refreshClientChat();
     chatPoll = setInterval(refreshClientChat, 3000);
+  }
+  async function toggleDeliveries() {
+    const box = document.getElementById('deliveriesBox');
+    if (box.innerHTML) { box.innerHTML = ''; return; }
+    box.innerHTML = '<div class="empty">Cargando…</div>';
+    try {
+      const list = await api('/support/api/thread/' + chatCustomerId + '/deliveries');
+      box.innerHTML = list.length
+        ? list.map(d => \`
+          <div class="row">
+            <div class="row-main"><b>\${esc(d.description)}</b></div>
+            <span class="sub">\${new Date(d.date).toLocaleString('es-MX')} · 🔖 \${esc(d.txId || '—')}</span>
+            <pre style="white-space:pre-wrap;word-break:break-word;background:var(--tg-theme-bg-color,#fff);padding:8px;border-radius:8px;margin:6px 0 0;font-family:inherit">\${esc(d.account)}</pre>
+          </div>\`).join('')
+        : '<div class="empty">Sin cuentas entregadas a este cliente todavía.</div>';
+    } catch (err) { box.innerHTML = '<div class="err">' + esc(err.message) + '</div>'; }
   }
   async function refreshClientChat() {
     if (!chatCustomerId || currentView !== 'chat') return;
@@ -1787,12 +1806,24 @@ app.get('/support/api/thread/:id', requireOperatorAuth, (req, res) => {
     });
 });
 
+// Cuentas entregadas a este cliente en el pasado, para revisar si hay un problema con alguna
+app.get('/support/api/thread/:id/deliveries', requireOperatorAuth, (req, res) => {
+    const customerId = parseInt(req.params.id, 10);
+    const list = sales
+        .filter(s => s.customerChatId === customerId && s.account)
+        .map(s => ({ date: s.date, description: s.description, account: s.account, txId: s.txId || null }))
+        .reverse();
+    res.json(list);
+});
+
 app.post('/support/api/thread/:id/reply', requireOperatorAuth, async (req, res) => {
     const customerId = parseInt(req.params.id, 10);
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: 'Mensaje vacío' });
     try {
-        await bot.sendMessage(customerId, text);
+        await bot.sendMessage(customerId, '🎧 Tienes una respuesta nueva de soporte.', {
+            reply_markup: { inline_keyboard: [[{ text: '🎧 Abrir Soporte', web_app: { url: `${APP_BASE_URL}/dashboard` } }]] }
+        });
     } catch (err) {
         return res.status(502).json({ error: err.message });
     }
@@ -1902,7 +1933,7 @@ app.post('/support/api/thread/:id/confirm-and-deliver', requireOperatorAuth, asy
     }
     persistTransfersState();
     const methodLabel = PAYMENT_METHODS[transfer.method]?.label || '🏧 Transferencia MXN';
-    recordSale({ date: new Date().toISOString(), method: transfer.method || 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId, account: text });
+    recordSale({ date: new Date().toISOString(), method: transfer.method || 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId, account: text, customerChatId: customerId });
     notifyAllOperators(`✅ ${methodLabel} confirmada y entregada (vía mini app) — $${parseFloat(transfer.amount).toFixed(2)} USD — ${transfer.description}`, {}, [req.operator.id]);
 
     res.json({ ok: true });
