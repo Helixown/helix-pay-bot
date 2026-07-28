@@ -86,6 +86,21 @@ function loadChannels() {
 const knownChannels = loadChannels(); // chatId (string) -> { title }
 function saveChannels() { fs.writeFileSync(CHANNELS_FILE, JSON.stringify(Object.fromEntries(knownChannels))); }
 
+// ── Historial de publicaciones en canales (para poder verlas/borrarlas despues, desde la mini app) ──
+const CHANNEL_POSTS_FILE = process.env.CHANNEL_POSTS_FILE || path.join(__dirname, 'channel_posts.json');
+function loadChannelPosts() {
+    try { return JSON.parse(fs.readFileSync(CHANNEL_POSTS_FILE, 'utf8')); }
+    catch { return []; }
+}
+const channelPosts = loadChannelPosts();
+function saveChannelPosts() { fs.writeFileSync(CHANNEL_POSTS_FILE, JSON.stringify(channelPosts, null, 2)); }
+function markChannelPostDeleted(chId, messageId) {
+    for (const post of channelPosts) {
+        const target = post.targets.find(t => t.chId === String(chId) && String(t.messageId) === String(messageId));
+        if (target) { target.deleted = true; saveChannelPosts(); return; }
+    }
+}
+
 // ── Catálogo de productos ─────────────────────────────────────────────────────
 const PRODUCTS_FILE = process.env.PRODUCTS_FILE || path.join(__dirname, 'products.json');
 function loadCatalog() {
@@ -568,9 +583,11 @@ bot.on('my_chat_member', (update) => {
 });
 
 function channelTargets() {
-    if (knownChannels.size) return [...knownChannels.entries()];
+    const targets = [...knownChannels.entries()];
     const fallbackUsername = CHANNEL_ID.startsWith('@') ? CHANNEL_ID.slice(1) : null;
-    return [[CHANNEL_ID, { title: CHANNEL_ID, username: fallbackUsername }]]; // respaldo: canal fijo original
+    const alreadyIncluded = targets.some(([, info]) => fallbackUsername && info.username && info.username.toLowerCase() === fallbackUsername.toLowerCase());
+    if (!alreadyIncluded) targets.push([CHANNEL_ID, { title: CHANNEL_ID, username: fallbackUsername }]); // canal original, por si no se detectó por my_chat_member
+    return targets;
 }
 
 // Link para ver la publicación: usa el @usuario si es público, o el formato interno t.me/c/... si es privado
@@ -601,6 +618,17 @@ async function postToChannel(fromChatId, text, editTarget) {
 
     const okResults   = results.filter(r => r.ok);
     const failResults = results.filter(r => !r.ok);
+
+    if (okResults.length) {
+        channelPosts.push({
+            id: crypto.randomBytes(4).toString('hex'),
+            date: new Date().toISOString(),
+            text: finalText,
+            targets: okResults.map(r => ({ chId: String(r.chId), title: r.info.title, messageId: r.messageId, deleted: false }))
+        });
+        if (channelPosts.length > 50) channelPosts.splice(0, channelPosts.length - 50);
+        saveChannelPosts();
+    }
 
     let confirmText = okResults.length
         ? `✅ Publicado en ${okResults.length} canal${okResults.length > 1 ? 'es' : ''}:\n` + okResults.map(r => `• ${r.info.title}`).join('\n')
@@ -680,6 +708,7 @@ bot.on('callback_query', async (cq) => {
         const [canalChatId, canalMessageId] = data.replace('del_canal_', '').split(':');
         try {
             await bot.deleteMessage(canalChatId, canalMessageId);
+            markChannelPostDeleted(canalChatId, canalMessageId);
             bot.answerCallbackQuery(cq.id, { text: '🗑️ Publicación borrada.' });
             await editOrSend(chatId, cq.message.message_id, `🗑️ Publicación borrada de ${knownChannels.get(canalChatId)?.title || canalChatId}.`,
                 { reply_markup: { inline_keyboard: [menuButtonRow(chatId)] } }
@@ -1595,17 +1624,45 @@ function renderDashboardApp() {
         <div class="form">
           <textarea id="chText" rows="4" placeholder="Texto a publicar…"></textarea>
           <button id="chSend">📢 Publicar en todos</button>
-        </div>\`;
+        </div>
+        <h3 style="margin:16px 0 8px">Publicaciones recientes</h3>
+        <div id="chPosts"><div class="empty">Cargando…</div></div>\`;
       document.getElementById('chSend').addEventListener('click', async () => {
         const text = document.getElementById('chText').value.trim();
         if (!text) return;
         try {
           await api('/api/channels/post', { method: 'POST', body: JSON.stringify({ text }) });
           document.getElementById('chText').value = '';
-          alert('Publicado. Revisa tu chat de Telegram para ver los detalles y el link.');
+          loadChannelPosts();
         } catch (err) { alert(err.message); }
       });
+      await loadChannelPosts();
     } catch (err) { app.innerHTML = '<div class="err">' + esc(err.message) + '</div>'; }
+  }
+  async function loadChannelPosts() {
+    const box = document.getElementById('chPosts');
+    if (!box) return;
+    try {
+      const posts = await api('/api/channels/posts');
+      box.innerHTML = posts.length ? posts.map(p => \`
+        <div class="row">
+          <div class="row-main"><b>\${new Date(p.date).toLocaleString('es-MX')}</b></div>
+          <span class="sub">\${esc(p.text.slice(0, 80))}</span>
+          <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
+            \${p.targets.map(t => \`
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+                <span class="sub">\${esc(t.title)}\${t.deleted ? ' — 🗑️ borrada' : ''}</span>
+                \${t.deleted ? '' : (t.url ? \`<a href="\${t.url}" target="_blank" style="font-size:12px">👀 Ver</a>\` : '')}
+              </div>\`).join('')}
+          </div>
+          \${p.targets.some(t => !t.deleted) ? \`<button class="del-post secondary-btn" data-id="\${p.id}">🗑️ Borrar publicación</button>\` : ''}
+        </div>\`).join('') : '<div class="empty">Sin publicaciones todavía.</div>';
+      box.querySelectorAll('.del-post').forEach(btn => btn.addEventListener('click', async () => {
+        if (!confirm('¿Borrar esta publicación de todos los canales donde sigue activa?')) return;
+        try { await api('/api/channels/posts/' + btn.dataset.id, { method: 'DELETE' }); loadChannelPosts(); }
+        catch (err) { alert(err.message); }
+      }));
+    } catch (err) { box.innerHTML = '<div class="err">' + esc(err.message) + '</div>'; }
   }
 
   // ---- COBRAR (operador) ----
@@ -2065,7 +2122,7 @@ app.post('/api/store', requireOperatorAuth, (req, res) => {
 
 // ── Canales ────────────────────────────────────────────────────────────────────
 app.get('/api/channels', requireOperatorAuth, (_req, res) => {
-    res.json([...knownChannels.entries()].map(([id, info]) => ({ id, title: info.title })));
+    res.json(channelTargets().map(([id, info]) => ({ id, title: info.title })));
 });
 app.post('/api/channels/post', requireOperatorAuth, async (req, res) => {
     const text = String(req.body?.text || '').trim();
@@ -2075,6 +2132,26 @@ app.post('/api/channels/post', requireOperatorAuth, async (req, res) => {
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
+});
+
+app.get('/api/channels/posts', requireOperatorAuth, (_req, res) => {
+    res.json([...channelPosts].reverse().slice(0, 20).map(p => ({
+        id: p.id,
+        date: p.date,
+        text: p.text,
+        targets: p.targets.map(t => ({ chId: t.chId, title: t.title, deleted: !!t.deleted, url: channelViewUrl(t.chId, { username: knownChannels.get(t.chId)?.username }, t.messageId) }))
+    })));
+});
+
+app.delete('/api/channels/posts/:id', requireOperatorAuth, async (req, res) => {
+    const post = channelPosts.find(p => p.id === req.params.id);
+    if (!post) return res.status(404).json({ error: 'No encontrada.' });
+    for (const t of post.targets) {
+        if (t.deleted) continue;
+        try { await bot.deleteMessage(t.chId, t.messageId); t.deleted = true; } catch { /* puede que ya no exista */ t.deleted = true; }
+    }
+    saveChannelPosts();
+    res.json({ ok: true });
 });
 
 // ── Operadores (solo admin) ────────────────────────────────────────────────────
