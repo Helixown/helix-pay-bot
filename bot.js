@@ -66,6 +66,15 @@ function loadCustomers() {
 const knownCustomers = loadCustomers();
 function saveCustomers() { fs.writeFileSync(CUSTOMERS_FILE, JSON.stringify([...knownCustomers])); }
 
+// ── Canales donde el bot es admin (para el broadcast de "Promocionar") ────────
+const CHANNELS_FILE = process.env.CHANNELS_FILE || path.join(__dirname, 'channels.json');
+function loadChannels() {
+    try { return new Map(Object.entries(JSON.parse(fs.readFileSync(CHANNELS_FILE, 'utf8')))); }
+    catch { return new Map(); }
+}
+const knownChannels = loadChannels(); // chatId (string) -> { title }
+function saveChannels() { fs.writeFileSync(CHANNELS_FILE, JSON.stringify(Object.fromEntries(knownChannels))); }
+
 // ── Catálogo de productos ─────────────────────────────────────────────────────
 const PRODUCTS_FILE = process.env.PRODUCTS_FILE || path.join(__dirname, 'products.json');
 function loadCatalog() {
@@ -529,34 +538,81 @@ bot.onText(/\/tienda/, (msg) => {
     sendTienda(msg.chat.id);
 });
 
+// Detecta cuando agregan/quitan al bot como admin de un canal, para el broadcast automático
+bot.on('my_chat_member', (update) => {
+    const chat = update.chat;
+    if (chat.type !== 'channel') return;
+    const status  = update.new_chat_member.status;
+    const canPost = update.new_chat_member.can_post_messages;
+    const key     = String(chat.id);
+    const title   = chat.title || chat.username || key;
+
+    if (status === 'administrator' && canPost !== false) {
+        if (!knownChannels.has(key)) {
+            knownChannels.set(key, { title, username: chat.username || null });
+            saveChannels();
+            bot.sendMessage(ADMIN_CHAT_ID, `📡 El bot ahora es admin en "${title}" — se agregó a la lista de difusión de "📢 Promocionar".`).catch(() => {});
+        }
+    } else if (knownChannels.has(key)) {
+        knownChannels.delete(key);
+        saveChannels();
+        bot.sendMessage(ADMIN_CHAT_ID, `📡 El bot ya no es admin en "${title}" — se quitó de la lista de difusión.`).catch(() => {});
+    }
+});
+
+function channelTargets() {
+    if (knownChannels.size) return [...knownChannels.entries()];
+    const fallbackUsername = CHANNEL_ID.startsWith('@') ? CHANNEL_ID.slice(1) : null;
+    return [[CHANNEL_ID, { title: CHANNEL_ID, username: fallbackUsername }]]; // respaldo: canal fijo original
+}
+
+// Link para ver la publicación: usa el @usuario si es público, o el formato interno t.me/c/... si es privado
+function channelViewUrl(chId, info, messageId) {
+    if (info.username) return `https://t.me/${info.username}/${messageId}`;
+    const idStr = String(chId);
+    if (idStr.startsWith('-100')) return `https://t.me/c/${idStr.slice(4)}/${messageId}`;
+    return null;
+}
+
 async function postToChannel(fromChatId, text, editTarget) {
     const finalText = text.trim() || '🛒 Descubre nuestros productos y paga 100% seguro. Toca el botón para ir a la tienda.';
     const menuButton = { text: '⬅️ Menú', callback_data: 'panel_home' };
+    const username = await getBotUsername().catch(() => null);
+    const targets = channelTargets();
 
-    try {
-        const username = await getBotUsername();
-        const sent = await bot.sendMessage(CHANNEL_ID, finalText, {
-            reply_markup: { inline_keyboard: [[{ text: '🛒 Ir a la tienda', url: `https://t.me/${username}?start=tienda` }]] }
-        });
-
-        const postUrl = CHANNEL_ID.startsWith('@') ? `https://t.me/${CHANNEL_ID.slice(1)}/${sent.message_id}` : null;
-        const confirmText = `✅ Publicado en ${CHANNEL_ID}.`;
-        const viewRow   = postUrl ? [{ text: '👀 Ver publicación', url: postUrl }] : null;
-        const deleteRow = [{ text: '🗑️ Borrar publicación', callback_data: `del_canal_${sent.message_id}` }];
-        const confirmKeyboard = [...(viewRow ? [viewRow] : []), deleteRow, [menuButton]];
-
-        if (editTarget) {
-            await replacePanel(editTarget.chatId, editTarget.messageId, confirmText, { reply_markup: { inline_keyboard: confirmKeyboard } });
-        } else {
-            bot.sendMessage(fromChatId, confirmText, { reply_markup: { inline_keyboard: confirmKeyboard } });
+    const results = [];
+    for (const [chId, info] of targets) {
+        try {
+            const sent = await bot.sendMessage(chId, finalText, {
+                reply_markup: { inline_keyboard: [[{ text: '🛒 Ir a la tienda', url: `https://t.me/${username}?start=tienda` }]] }
+            });
+            results.push({ chId, info, messageId: sent.message_id, ok: true });
+        } catch (err) {
+            results.push({ chId, info, error: err.message, ok: false });
         }
-    } catch (err) {
-        const errorText = `❌ No se pudo publicar: ${err.message}\nAsegúrate de que el bot sea admin de ${CHANNEL_ID}.`;
-        if (editTarget) {
-            await replacePanel(editTarget.chatId, editTarget.messageId, errorText, { reply_markup: { inline_keyboard: [[menuButton]] } });
-        } else {
-            bot.sendMessage(fromChatId, errorText);
-        }
+    }
+
+    const okResults   = results.filter(r => r.ok);
+    const failResults = results.filter(r => !r.ok);
+
+    let confirmText = okResults.length
+        ? `✅ Publicado en ${okResults.length} canal${okResults.length > 1 ? 'es' : ''}:\n` + okResults.map(r => `• ${r.info.title}`).join('\n')
+        : '❌ No se pudo publicar en ningún canal.';
+    if (failResults.length) confirmText += `\n\n⚠️ Falló en: ${failResults.map(r => r.info.title).join(', ')}`;
+
+    const confirmKeyboard = okResults.map(r => {
+        const row = [];
+        const viewUrl = channelViewUrl(r.chId, r.info, r.messageId);
+        if (viewUrl) row.push({ text: `👀 Ver en ${r.info.title}`, url: viewUrl });
+        row.push({ text: `🗑️ Borrar en ${r.info.title}`, callback_data: `del_canal_${r.chId}:${r.messageId}` });
+        return row;
+    });
+    confirmKeyboard.push([menuButton]);
+
+    if (editTarget) {
+        await replacePanel(editTarget.chatId, editTarget.messageId, confirmText, { reply_markup: { inline_keyboard: confirmKeyboard } });
+    } else {
+        bot.sendMessage(fromChatId, confirmText, { reply_markup: { inline_keyboard: confirmKeyboard } });
     }
 }
 
@@ -565,15 +621,30 @@ bot.onText(/\/promocanal(?:\s+([\s\S]+))?/, (msg, match) => {
     postToChannel(msg.chat.id, match[1] || '');
 });
 
-bot.onText(/\/borrarcanal(?:\s+(\d+))?/, async (msg, match) => {
+bot.onText(/\/canales/, (msg) => {
     if (!isAllowed(msg.chat.id)) return;
-    const messageId = match[1];
-    if (!messageId) {
-        return bot.sendMessage(msg.chat.id, `❌ Uso: /borrarcanal <id_del_mensaje>\nEl id es el número al final del link de la publicación en ${CHANNEL_ID} (ej. t.me/${CHANNEL_ID.replace('@', '')}/<b>45</b> -> 45).`, { parse_mode: 'HTML' });
+    if (!knownChannels.size) {
+        return bot.sendMessage(msg.chat.id, `📡 No hay canales detectados automáticamente todavía.\nAgrega el bot como admin (con permiso de publicar) a un canal y aparecerá aquí solo.\n\nRespaldo actual: ${CHANNEL_ID}`);
+    }
+    const lista = [...knownChannels.values()].map(c => `• ${c.title}`).join('\n');
+    bot.sendMessage(msg.chat.id, `📡 <b>Canales conectados</b>\n${lista}`, { parse_mode: 'HTML' });
+});
+
+bot.onText(/\/borrarcanal(?:\s+(\S+))?(?:\s+(\d+))?/, async (msg, match) => {
+    if (!isAllowed(msg.chat.id)) return;
+    let target = match[1];
+    let messageId = match[2];
+    if (target && !messageId && /^\d+$/.test(target)) {
+        // uso viejo: /borrarcanal <id_del_mensaje> (usa el canal de respaldo)
+        messageId = target;
+        target = CHANNEL_ID;
+    }
+    if (!target || !messageId) {
+        return bot.sendMessage(msg.chat.id, '❌ Uso: /borrarcanal [@canal o chatId] <id_del_mensaje>\nSin especificar canal, usa /canales para ver los conectados y el botón "🗑️ Borrar en..." de cada publicación.');
     }
     try {
-        await bot.deleteMessage(CHANNEL_ID, messageId);
-        bot.sendMessage(msg.chat.id, `🗑️ Publicación <code>${messageId}</code> borrada de ${CHANNEL_ID}.`, { parse_mode: 'HTML' });
+        await bot.deleteMessage(target, messageId);
+        bot.sendMessage(msg.chat.id, `🗑️ Publicación <code>${messageId}</code> borrada de ${target}.`, { parse_mode: 'HTML' });
     } catch (err) {
         bot.sendMessage(msg.chat.id, `❌ No se pudo borrar: ${err.message}`);
     }
@@ -685,8 +756,9 @@ ${stripe ? '✅' : '❌'} Stripe (tarjeta)
 /delproducto <code>&lt;id&gt;</code>
 
 <b>Promoción:</b>
-/promocanal <code>[texto]</code> — publica en ${CHANNEL_ID}
-/borrarcanal <code>&lt;id_del_mensaje&gt;</code> — borra una publicación vieja
+/promocanal <code>[texto]</code> — publica en todos los canales conectados
+/canales — ver canales donde el bot es admin (se detectan solos)
+/borrarcanal <code>[@canal] &lt;id_del_mensaje&gt;</code> — borra una publicación vieja
 
 <b>Ventas:</b>
 /ventas
@@ -870,7 +942,8 @@ bot.on('callback_query', async (cq) => {
     if (data === 'panel_promocionar') {
         if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
         bot.answerCallbackQuery(cq.id);
-        const result = await editOrSend(chatId, cq.message.message_id, `📢 Envía el texto que quieres publicar en ${CHANNEL_ID}.`,
+        const chCount = knownChannels.size || 1;
+        const result = await editOrSend(chatId, cq.message.message_id, `📢 Envía el texto que quieres publicar (se manda a ${chCount} canal${chCount > 1 ? 'es' : ''}).`,
             { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
         );
         awaitingCanalPost.set(chatId, result?.message_id || cq.message.message_id);
@@ -880,11 +953,11 @@ bot.on('callback_query', async (cq) => {
 
     if (data.startsWith('del_canal_')) {
         if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
-        const canalMessageId = data.replace('del_canal_', '');
+        const [canalChatId, canalMessageId] = data.replace('del_canal_', '').split(':');
         try {
-            await bot.deleteMessage(CHANNEL_ID, canalMessageId);
+            await bot.deleteMessage(canalChatId, canalMessageId);
             bot.answerCallbackQuery(cq.id, { text: '🗑️ Publicación borrada.' });
-            await editOrSend(chatId, cq.message.message_id, `🗑️ Publicación borrada de ${CHANNEL_ID}.`,
+            await editOrSend(chatId, cq.message.message_id, `🗑️ Publicación borrada de ${knownChannels.get(canalChatId)?.title || canalChatId}.`,
                 { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
             );
         } catch (err) {
