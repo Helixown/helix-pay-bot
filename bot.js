@@ -579,7 +579,20 @@ function ventasPanel() {
 ━━━━━━━━━━━━━━
 🧾 Vendidas: <b>${sales.length}</b>
 💰 Total generado: <b>$${total.toFixed(2)} USD</b>`;
-    return { text, keyboard: [[{ text: '🗑️ Reiniciar contador', callback_data: 'reset_ventas_ask' }]] };
+    return { text, keyboard: [
+        [{ text: '🧾 Ver / borrar una venta', callback_data: 'panel_ventas_lista' }],
+        [{ text: '🗑️ Reiniciar contador', callback_data: 'reset_ventas_ask' }]
+    ] };
+}
+
+function ventasListaPanel() {
+    if (!sales.length) return { text: '📊 No hay ventas registradas.', keyboard: [] };
+    const recent = sales.map((s, idx) => ({ ...s, idx })).slice(-10).reverse();
+    const keyboard = recent.map(s => {
+        const desc = String(s.description).slice(0, 20);
+        return [{ text: `🗑️ ${s.date.slice(0, 10)} — $${s.amount.toFixed(2)} — ${desc}`, callback_data: `del_venta_${s.idx}` }];
+    });
+    return { text: '📊 <b>Últimas ventas</b>\n━━━━━━━━━━━━━━\nToca una para borrarla (uso: testing/corrección):', keyboard };
 }
 
 function sendVentas(chatId) {
@@ -793,6 +806,25 @@ bot.on('callback_query', async (cq) => {
         if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
         bot.answerCallbackQuery(cq.id);
         return editPanel(chatId, cq.message.message_id, ventasPanel());
+    }
+
+    if (data === 'panel_ventas_lista') {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        bot.answerCallbackQuery(cq.id);
+        return editPanel(chatId, cq.message.message_id, ventasListaPanel());
+    }
+
+    if (data.startsWith('del_venta_')) {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        const idx = parseInt(data.replace('del_venta_', ''), 10);
+        if (isNaN(idx) || idx < 0 || idx >= sales.length) {
+            bot.answerCallbackQuery(cq.id, { text: '❌ Ya no existe.' });
+            return editPanel(chatId, cq.message.message_id, ventasListaPanel());
+        }
+        sales.splice(idx, 1);
+        fs.writeFileSync(SALES_FILE, JSON.stringify(sales, null, 2));
+        bot.answerCallbackQuery(cq.id, { text: '🗑️ Venta borrada.' });
+        return editPanel(chatId, cq.message.message_id, ventasListaPanel());
     }
 
     if (data === 'panel_cobrar') {
