@@ -68,6 +68,15 @@ function loadCustomers() {
 const knownCustomers = loadCustomers();
 function saveCustomers() { fs.writeFileSync(CUSTOMERS_FILE, JSON.stringify([...knownCustomers])); }
 
+// ── Tienda abierta/cerrada (solo bloquea el autoservicio /tienda) ─────────────
+const STORE_STATUS_FILE = process.env.STORE_STATUS_FILE || path.join(__dirname, 'store_status.json');
+function loadStoreOpen() {
+    try { return JSON.parse(fs.readFileSync(STORE_STATUS_FILE, 'utf8')).open !== false; }
+    catch { return true; }
+}
+let storeOpen = loadStoreOpen();
+function saveStoreStatus() { fs.writeFileSync(STORE_STATUS_FILE, JSON.stringify({ open: storeOpen })); }
+
 // ── Canales donde el bot es admin (para el broadcast de "Promocionar") ────────
 const CHANNELS_FILE = process.env.CHANNELS_FILE || path.join(__dirname, 'channels.json');
 function loadChannels() {
@@ -216,6 +225,22 @@ const awaitingCanalPost = new Map(); // chatId del operador -> message_id del pa
 // ── Soporte (cliente <-> operadores) ──────────────────────────────────────────
 const openSupportChats = new Set(); // chatId del cliente con conversación de soporte abierta
 const supportMessages  = new Map(); // `${operatorChatId}:${messageId}` -> chatId del cliente (para responder con reply)
+const awaitingSupportReplyTo = new Map(); // chatId del operador -> chatId del cliente al que le está escribiendo desde el panel
+
+const SUPPORT_FILE = process.env.SUPPORT_FILE || path.join(__dirname, 'support.json');
+function loadSupportThreads() {
+    try { return new Map(Object.entries(JSON.parse(fs.readFileSync(SUPPORT_FILE, 'utf8')))); }
+    catch { return new Map(); }
+}
+const supportThreads = loadSupportThreads(); // chatId del cliente (string) -> { name, lastMessage, lastAt }
+function persistSupportThreads() { fs.writeFileSync(SUPPORT_FILE, JSON.stringify(Object.fromEntries(supportThreads))); }
+
+function setSupportReplyTo(operatorId, customerId) {
+    awaitingSupportReplyTo.set(operatorId, customerId);
+    setTimeout(() => {
+        if (awaitingSupportReplyTo.get(operatorId) === customerId) awaitingSupportReplyTo.delete(operatorId);
+    }, 30 * 60 * 1000);
+}
 
 // ── Transferencias manuales (MXN, Binance, AirTM) ─────────────────────────────
 // Persistido en disco para sobrevivir a reinicios entre que se manda el cobro y se confirma/entrega
@@ -523,6 +548,7 @@ bot.onText(/\/listproductos/, (msg) => {
 });
 
 function tiendaPanel() {
+    if (!storeOpen) return { text: '🔴 <b>JH STORE</b>\n━━━━━━━━━━━━━━\nEn este momento no estamos recibiendo pedidos. Vuelve más tarde 🙏', keyboard: [] };
     const ids = Object.keys(catalog.items);
     if (!ids.length) return { text: '🛒 No hay productos disponibles por el momento.', keyboard: [] };
     const buttons = ids.map(id => ([{ text: `${catalog.items[id].name} — $${catalog.items[id].price.toFixed(2)}`, callback_data: `buy_${id}` }]));
@@ -741,6 +767,29 @@ function metodoDetallePanel(key) {
     return { text, keyboard: [[{ text: '✏️ Actualizar', callback_data: `panel_metodo_edit_${key}` }]] };
 }
 
+function soportePanel() {
+    if (!supportThreads.size) return { text: '💬 <b>Soporte</b>\n━━━━━━━━━━━━━━\nNo hay conversaciones abiertas.', keyboard: [] };
+    const entries = [...supportThreads.entries()].sort((a, b) => b[1].lastAt - a[1].lastAt);
+    const keyboard = entries.map(([custId, t]) => {
+        const preview = String(t.lastMessage || '').slice(0, 30);
+        return [{ text: `👤 ${t.name} — ${preview}`, callback_data: `soporte_abrir_${custId}` }];
+    });
+    return { text: '💬 <b>Soporte</b>\n━━━━━━━━━━━━━━\nConversaciones abiertas, toca una para responder:', keyboard };
+}
+
+function soporteHiloPanel(custId) {
+    const t = supportThreads.get(String(custId));
+    if (!t) return { text: '💬 Esta conversación ya no está abierta.', keyboard: [] };
+    const esc = (s) => String(s).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+    const text =
+`💬 <b>${esc(t.name)}</b>
+━━━━━━━━━━━━━━
+"${esc(t.lastMessage)}"
+
+Escribe tu respuesta directamente (sin reply), se le manda al cliente.`;
+    return { text, keyboard: [[{ text: '✅ Marcar resuelto', callback_data: `soporte_cerrar_${custId}` }]] };
+}
+
 function operadoresPanel() {
     const lista = [...operadores].map(id => `• <code>${id}</code>${id === ADMIN_CHAT_ID ? ' (admin)' : ''}`).join('\n');
     const text =
@@ -800,6 +849,8 @@ Elige una opción:`;
     const keyboard = [
         [{ text: '🛒 Catálogo', callback_data: 'panel_catalogo' }, { text: '📊 Ventas', callback_data: 'panel_ventas' }],
         [{ text: '💰 Cobrar', callback_data: 'panel_cobrar' }, { text: '💳 Métodos de pago', callback_data: 'panel_metodos' }],
+        [{ text: storeOpen ? '🟢 Tienda: Abierta' : '🔴 Tienda: Cerrada', callback_data: 'toggle_store' }],
+        [{ text: `💬 Soporte${supportThreads.size ? ` (${supportThreads.size})` : ''}`, callback_data: 'panel_soporte' }],
         [{ text: '📢 Promocionar', callback_data: 'panel_promocionar' }]
     ];
     if (isAdmin) keyboard.push([{ text: '👥 Operadores', callback_data: 'panel_operadores' }]);
@@ -998,6 +1049,45 @@ bot.on('callback_query', async (cq) => {
         return;
     }
 
+    if (data === 'toggle_store') {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        storeOpen = !storeOpen;
+        saveStoreStatus();
+        bot.answerCallbackQuery(cq.id, { text: storeOpen ? '🟢 Tienda abierta.' : '🔴 Tienda cerrada.' });
+        const panel = operatorHomePanel(chatId === ADMIN_CHAT_ID);
+        return editOrSend(chatId, cq.message.message_id, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
+    }
+
+    if (data === 'panel_soporte') {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        bot.answerCallbackQuery(cq.id);
+        return editPanel(chatId, cq.message.message_id, soportePanel());
+    }
+
+    if (data.startsWith('soporte_abrir_')) {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        const custId = data.replace('soporte_abrir_', '');
+        if (!supportThreads.has(custId)) {
+            bot.answerCallbackQuery(cq.id, { text: '❌ Ya no está disponible.' });
+            return editPanel(chatId, cq.message.message_id, soportePanel());
+        }
+        bot.answerCallbackQuery(cq.id);
+        setSupportReplyTo(chatId, parseInt(custId, 10));
+        return editPanel(chatId, cq.message.message_id, soporteHiloPanel(custId));
+    }
+
+    if (data.startsWith('soporte_cerrar_')) {
+        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
+        const custId = data.replace('soporte_cerrar_', '');
+        supportThreads.delete(custId);
+        persistSupportThreads();
+        for (const [opId, cId] of awaitingSupportReplyTo) {
+            if (String(cId) === custId) awaitingSupportReplyTo.delete(opId);
+        }
+        bot.answerCallbackQuery(cq.id, { text: '✅ Marcado como resuelto.' });
+        return editPanel(chatId, cq.message.message_id, soportePanel());
+    }
+
     if (data === 'panel_operadores') {
         if (chatId !== ADMIN_CHAT_ID) return bot.answerCallbackQuery(cq.id);
         bot.answerCallbackQuery(cq.id);
@@ -1039,6 +1129,10 @@ bot.on('callback_query', async (cq) => {
     }
 
     if (data.startsWith('buy_')) {
+        if (!storeOpen) {
+            bot.answerCallbackQuery(cq.id, { text: '🔴 Tienda cerrada por ahora.' });
+            return editOrSend(chatId, cq.message.message_id, '🔴 En este momento no estamos recibiendo pedidos. Vuelve más tarde 🙏', {});
+        }
         const productId = data.replace('buy_', '');
         const product    = catalog.items[productId];
         if (!product) return bot.answerCallbackQuery(cq.id, { text: '❌ Producto no disponible.' });
@@ -1330,17 +1424,26 @@ bot.on('message', async (msg) => {
     // Mensaje del cliente con soporte abierto -> reenviar a todos los operadores
     if (openSupportChats.has(chatId) && !isAllowed(chatId) && !(msg.text && msg.text.startsWith('/'))) {
         const who = msg.from?.username ? '@' + msg.from.username : (msg.from?.first_name || 'Cliente');
+        supportThreads.set(String(chatId), {
+            name: who,
+            lastMessage: msg.text ? msg.text.slice(0, 80) : '📎 [archivo/foto]',
+            lastAt: Date.now()
+        });
+        persistSupportThreads();
         for (const opId of operadores) {
             bot.copyMessage(opId, chatId, msg.message_id)
                 .then((sent) => {
                     supportMessages.set(`${opId}:${sent.message_id}`, chatId);
                     setTimeout(() => supportMessages.delete(`${opId}:${sent.message_id}`), 24 * 60 * 60 * 1000);
-                    return bot.sendMessage(opId, `💬 Mensaje de soporte de ${who} (arriba 👆). Responde a su mensaje para contestarle.`);
+                    return bot.sendMessage(opId, `💬 Mensaje de soporte de ${who} (arriba 👆). Responde a su mensaje, o usa el botón para contestarle desde el panel.`, {
+                        reply_markup: { inline_keyboard: [[{ text: '💬 Abrir chat', callback_data: `soporte_abrir_${chatId}` }]] }
+                    });
                 })
                 .catch(() => {});
         }
         return;
     }
+
 
     if (!msg.text || msg.text.startsWith('/')) return;
 
@@ -1358,6 +1461,16 @@ bot.on('message', async (msg) => {
         awaitingMethodUpdate.delete(chatId);
         saveMethodDetails(key, msg.text);
         await replacePanel(chatId, messageId, `✅ ${PAYMENT_METHODS[key].label} actualizado.\n\n${formatDetailLines(msg.text)}`, { parse_mode: 'HTML' });
+        return;
+    }
+
+    // Respuesta directa a un cliente de soporte (tras abrir su chat desde el panel "💬 Soporte")
+    if (awaitingSupportReplyTo.has(chatId)) {
+        const customerId = awaitingSupportReplyTo.get(chatId);
+        setSupportReplyTo(chatId, customerId); // renueva el tiempo de espera
+        bot.copyMessage(customerId, chatId, msg.message_id)
+            .then(() => bot.sendMessage(chatId, '✅ Enviado al cliente.'))
+            .catch(() => bot.sendMessage(chatId, '⚠️ No se pudo enviar al cliente.'));
         return;
     }
 });
