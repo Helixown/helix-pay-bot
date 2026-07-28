@@ -1467,27 +1467,14 @@ bot.on('message', async (msg) => {
         return;
     }
 
-    // Comprobante (foto/documento/texto) del cliente -> reenviar a TODOS los operadores para que cualquiera confirme y entregue
+    // Comprobante (foto/documento/texto) del cliente -> reenviar a TODOS los operadores; la accion (confirmar+entregar) se hace en la mini app
     const awaitingProof = transferByCustomer.get(chatId);
     if (awaitingProof && !(msg.text && msg.text.startsWith('/'))) {
         for (const opId of operadores) {
             bot.copyMessage(opId, chatId, msg.message_id)
-                .then((sent) => {
-                    transferMessages.set(`${opId}:${sent.message_id}`, awaitingProof.transferId);
-                    persistTransfersState();
-                    setTimeout(() => { transferMessages.delete(`${opId}:${sent.message_id}`); persistTransfersState(); }, 24 * 60 * 60 * 1000);
-                    return bot.sendMessage(opId,
-                        '📎 Comprobante recibido del cliente (arriba 👆). Responde a este mensaje con la cuenta para confirmar y entregársela junto con el agradecimiento, o usa el botón para solo confirmar.', {
-                            reply_markup: { inline_keyboard: [[{ text: '✅ Confirmar pago recibido', callback_data: `confirm_transfer_${awaitingProof.transferId}` }]] }
-                        });
-                })
-                .then((sent2) => {
-                    if (sent2) {
-                        transferMessages.set(`${opId}:${sent2.message_id}`, awaitingProof.transferId);
-                        persistTransfersState();
-                        setTimeout(() => { transferMessages.delete(`${opId}:${sent2.message_id}`); persistTransfersState(); }, 24 * 60 * 60 * 1000);
-                    }
-                })
+                .then(() => bot.sendMessage(opId, '💳 Comprobante recibido (arriba 👆). Ábrelo en Pedidos para confirmar y entregar la cuenta.', {
+                    reply_markup: { inline_keyboard: [[{ text: '🧾 Abrir Pedidos', web_app: { url: `${APP_BASE_URL}/dashboard` } }]] }
+                }))
                 .catch(() => {});
         }
         return;
@@ -2335,7 +2322,6 @@ app.post('/support/api/thread/:id/deliver', requireOperatorAuth, async (req, res
     }
     persistTransfersState();
     if (pending.txId) attachDeliveryToSale(pending.txId, text);
-    pushSupportMessage(customerId, 'operator', `📦 Cuenta entregada:\n${text}`);
     notifyAllOperators(`✅ Cuenta entregada (mini app) — ${pending.description}`, {}, [req.operator.id]);
 
     res.json({ ok: true });
@@ -2411,10 +2397,12 @@ app.post('/support/api/thread/:id/confirm-and-deliver', requireOperatorAuth, asy
 
     pendingTransfers.delete(transferId);
     transferByCustomer.delete(customerId);
+    for (const [opId, d] of [...awaitingDelivery.entries()]) {
+        if (d.customerChatId === customerId) awaitingDelivery.delete(opId);
+    }
     persistTransfersState();
     const methodLabel = PAYMENT_METHODS[transfer.method]?.label || '🏧 Transferencia MXN';
     recordSale({ date: new Date().toISOString(), method: transfer.method || 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId, account: text });
-    pushSupportMessage(customerId, 'operator', `📦 Cuenta entregada:\n${text}`);
     notifyAllOperators(`✅ ${methodLabel} confirmada y entregada (vía mini app) — $${parseFloat(transfer.amount).toFixed(2)} USD — ${transfer.description}`, {}, [req.operator.id]);
 
     res.json({ ok: true });
