@@ -1744,6 +1744,7 @@ function renderDashboardApp() {
   let me = null;
   let currentView = 'home';
   let chatCustomerId = null;
+  let chatOrigin = 'clients';
   let chatPoll = null;
   let listPoll = null;
 
@@ -1782,9 +1783,7 @@ function renderDashboardApp() {
 
   backBtn.addEventListener('click', () => {
     stopPolls();
-    if (currentView === 'chat') renderClients();
-    else if (currentView === 'customerPay') renderCustomerStore();
-    else if (currentView === 'customerStore' || currentView === 'customerChat') renderCustomerHome();
+    if (currentView === 'chat') (chatOrigin === 'orders' ? renderOrders : renderClients)();
     else if (me && me.isOperator) renderHome();
   });
 
@@ -1810,7 +1809,8 @@ function renderDashboardApp() {
         <button class="tile" data-v="catalog">🛒<div>Catálogo</div></button>
         <button class="tile" data-v="sales">📊<div>Ventas</div></button>
         <button class="tile" data-v="methods">💳<div>Métodos</div></button>
-        <button class="tile" data-v="clients">💬<div>Clientes</div></button>
+        <button class="tile" data-v="clients">💬<div>Soporte</div></button>
+        <button class="tile" data-v="orders">📦<div>Pedidos</div></button>
         <button class="tile" data-v="channels">📢<div>Canales</div></button>
         <button class="tile" data-v="charge">💰<div>Cobrar</div></button>
         <button class="tile" id="storeTile">…</button>
@@ -1834,7 +1834,7 @@ function renderDashboardApp() {
   }
 
   function go(view) {
-    ({ catalog: renderCatalog, sales: renderSales, methods: renderMethods, clients: renderClients, channels: renderChannels, operators: renderOperators, charge: renderCharge })[view]();
+    ({ catalog: renderCatalog, sales: renderSales, methods: renderMethods, clients: renderClients, orders: renderOrders, channels: renderChannels, operators: renderOperators, charge: renderCharge })[view]();
   }
 
   // ---- CATÁLOGO ----
@@ -1941,31 +1941,43 @@ function renderDashboardApp() {
     });
   }
 
-  // ---- CLIENTES (lista) ----
+  // ---- CLIENTES (soporte: solo conversaciones reales) ----
   async function renderClients() {
     stopPolls();
     currentView = 'clients';
-    setHeader('💬 Clientes', true);
+    setHeader('💬 Soporte', true);
     app.innerHTML = '<div class="empty">Cargando…</div>';
-    await loadClientsList();
-    listPoll = setInterval(() => { if (currentView === 'clients') loadClientsList(); }, 5000);
+    await loadClientsList(t => t.isChatThread, 'No hay conversaciones abiertas.');
+    listPoll = setInterval(() => { if (currentView === 'clients') loadClientsList(t => t.isChatThread, 'No hay conversaciones abiertas.'); }, 5000);
   }
-  async function loadClientsList() {
+
+  // ---- PEDIDOS (pagos por confirmar / cuentas por entregar) ----
+  async function renderOrders() {
+    stopPolls();
+    currentView = 'orders';
+    setHeader('📦 Pedidos', true);
+    app.innerHTML = '<div class="empty">Cargando…</div>';
+    await loadClientsList(t => t.pendingDelivery || t.pendingConfirm, 'No hay pedidos pendientes.');
+    listPoll = setInterval(() => { if (currentView === 'orders') loadClientsList(t => t.pendingDelivery || t.pendingConfirm, 'No hay pedidos pendientes.'); }, 5000);
+  }
+
+  async function loadClientsList(filterFn, emptyMsg) {
     try {
-      const threads = await api('/support/api/threads');
-      if (!threads.length) { app.innerHTML = '<div class="empty">No hay conversaciones abiertas.</div>'; return; }
+      const threads = (await api('/support/api/threads')).filter(filterFn);
+      if (!threads.length) { app.innerHTML = '<div class="empty">' + esc(emptyMsg) + '</div>'; return; }
       app.innerHTML = threads.map(t => \`
         <div class="row thread" data-id="\${t.id}">
           <div class="row-main"><b>👤 \${esc(t.name)}</b>\${t.pendingConfirm ? '<span class="badge">💳 confirmar</span>' : ''}\${t.pendingDelivery ? '<span class="badge">📦 entregar</span>' : ''}</div>
           <span class="sub">\${esc(t.lastMessage || '')} · \${timeAgo(t.lastAt)}</span>
         </div>\`).join('');
-      app.querySelectorAll('.thread').forEach(el => el.addEventListener('click', () => openClientChat(el.dataset.id)));
+      app.querySelectorAll('.thread').forEach(el => el.addEventListener('click', () => openClientChat(el.dataset.id, currentView)));
     } catch (err) { app.innerHTML = '<div class="err">' + esc(err.message) + '</div>'; }
   }
 
   // ---- CLIENTES (chat + entrega) ----
-  async function openClientChat(id) {
+  async function openClientChat(id, origin) {
     clearInterval(listPoll);
+    chatOrigin = origin === 'orders' ? 'orders' : 'clients';
     currentView = 'chat';
     chatCustomerId = id;
     setHeader('💬 …', true);
@@ -1980,7 +1992,7 @@ function renderDashboardApp() {
     document.getElementById('chatSend').addEventListener('click', sendChat);
     document.getElementById('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
     document.getElementById('resolveBtn').addEventListener('click', async () => {
-      try { await api('/support/api/thread/' + chatCustomerId + '/resolve', { method: 'POST' }); renderClients(); }
+      try { await api('/support/api/thread/' + chatCustomerId + '/resolve', { method: 'POST' }); (chatOrigin === 'orders' ? renderOrders : renderClients)(); }
       catch (err) { alert(err.message); }
     });
     await refreshClientChat();
@@ -1995,10 +2007,11 @@ function renderDashboardApp() {
       if (t.pendingConfirm) {
         box.innerHTML = \`
           <div class="deliver-form">
-            💳 Esperando confirmación de pago: \${esc(t.confirmDescription || '')} \${t.confirmAmount ? '($' + t.confirmAmount + ')' : ''}
-            <button id="confirmBtn">✅ Confirmar pago recibido</button>
+            💳 Comprobante recibido — \${esc(t.confirmDescription || '')} \${t.confirmAmount ? '($' + t.confirmAmount + ')' : ''}
+            <input id="deliverText" placeholder="correo:contraseña" />
+            <button id="deliverBtn">📦 Entregar cuenta</button>
           </div>\`;
-        document.getElementById('confirmBtn').onclick = confirmTransfer;
+        document.getElementById('deliverBtn').onclick = () => confirmAndDeliver();
       } else if (t.pendingDelivery) {
         box.innerHTML = \`
           <div class="deliver-form">
@@ -2034,9 +2047,11 @@ function renderDashboardApp() {
     try { await api('/support/api/thread/' + chatCustomerId + '/deliver', { method: 'POST', body: JSON.stringify({ text }) }); input.value = ''; refreshClientChat(); }
     catch (err) { alert(err.message); }
   }
-  async function confirmTransfer() {
-    if (!chatCustomerId) return;
-    try { await api('/support/api/thread/' + chatCustomerId + '/confirm-transfer', { method: 'POST' }); refreshClientChat(); }
+  async function confirmAndDeliver() {
+    const input = document.getElementById('deliverText');
+    const text = input.value.trim();
+    if (!text || !chatCustomerId) return;
+    try { await api('/support/api/thread/' + chatCustomerId + '/confirm-and-deliver', { method: 'POST', body: JSON.stringify({ text }) }); input.value = ''; refreshClientChat(); }
     catch (err) { alert(err.message); }
   }
 
@@ -2123,80 +2138,11 @@ function renderDashboardApp() {
     } catch (err) { app.innerHTML = '<div class="err">' + esc(err.message) + '</div>'; }
   }
 
-  // ---- CLIENTE: inicio ----
-  function renderCustomerHome() {
-    stopPolls();
-    currentView = 'customerHome';
-    setHeader('💳 Pay Bot', false);
-    app.innerHTML = \`
-      <div class="grid">
-        <button class="tile" data-cv="store">🛒<div>Tienda</div></button>
-        <button class="tile" data-cv="chat">💬<div>Soporte</div></button>
-      </div>\`;
-    app.querySelectorAll('[data-cv]').forEach(b => b.addEventListener('click', () => {
-      if (b.dataset.cv === 'store') renderCustomerStore(); else renderCustomerChat();
-    }));
-  }
-
-  // ---- CLIENTE: tienda ----
-  async function renderCustomerStore() {
-    stopPolls();
-    currentView = 'customerStore';
-    setHeader('🛒 Tienda', true);
-    app.innerHTML = '<div class="empty">Cargando…</div>';
-    try {
-      const data = await api('/api/store/catalog');
-      if (!data.open) { app.innerHTML = '<div class="empty">La tienda está cerrada por ahora. Intenta más tarde.</div>'; return; }
-      if (!data.items.length) { app.innerHTML = '<div class="empty">Sin productos disponibles por ahora.</div>'; return; }
-      app.innerHTML = data.items.map(p => \`
-        <div class="row buyRow" data-id="\${p.id}">
-          <div class="row-main"><b>\${esc(p.name)}</b></div>
-          <span class="sub">$\${p.price.toFixed(2)} USD</span>
-        </div>\`).join('');
-      app.querySelectorAll('.buyRow').forEach(el => el.addEventListener('click', () => startBuy(el.dataset.id)));
-    } catch (err) { app.innerHTML = '<div class="err">' + esc(err.message) + '</div>'; }
-  }
-  async function startBuy(productId) {
-    try {
-      const data = await api('/api/store/buy', { method: 'POST', body: JSON.stringify({ productId }) });
-      renderPayOptions(data.pendingId, data.amount, data.description, data.methods);
-    } catch (err) { alert(err.message); }
-  }
-  function renderPayOptions(pendingId, amount, description, methods) {
-    currentView = 'customerPay';
-    setHeader('💳 Pagar', true);
-    app.innerHTML = \`
-      <div class="row"><div class="row-main"><b>\${esc(description)}</b></div><span class="sub">$\${amount.toFixed(2)} USD</span></div>
-      <div class="form">\${methods.map(m => \`<button class="payM" data-m="\${m.key}">\${m.label}</button>\`).join('')}</div>
-      <div id="payResult"></div>\`;
-    app.querySelectorAll('.payM').forEach(b => b.addEventListener('click', () => choosePay(pendingId, b.dataset.m)));
-  }
-  async function choosePay(pendingId, method) {
-    try {
-      const data = await api('/api/store/pay/' + pendingId + '/' + method, { method: 'POST' });
-      if (data.type === 'redirect') {
-        if (window.Telegram?.WebApp?.openLink) Telegram.WebApp.openLink(data.url); else window.open(data.url, '_blank');
-        document.getElementById('payResult').innerHTML = '<div class="empty">Se abrió la página de pago. Cuando termines, vuelve aquí.</div>';
-        return;
-      }
-      document.getElementById('payResult').innerHTML = \`
-        <div class="deliver-form">
-          \${esc(data.label)} — \${esc(data.amountLine)}
-          <pre style="white-space:pre-wrap;word-break:break-word;background:var(--tg-theme-bg-color,#fff);padding:8px;border-radius:8px;margin:8px 0">\${esc(data.text)}</pre>
-          Cuando hayas pagado, cierra esto y envía la foto de tu comprobante aquí mismo en el chat de Telegram (como cualquier foto normal).
-          <button id="closeToChat">💬 Ir al chat a enviar el comprobante</button>
-        </div>\`;
-      document.getElementById('closeToChat').addEventListener('click', () => {
-        if (window.Telegram?.WebApp?.close) Telegram.WebApp.close();
-      });
-    } catch (err) { alert(err.message); }
-  }
-
-  // ---- CLIENTE (su propio chat) ----
+  // ---- CLIENTE (su propio chat de soporte, única vista para clientes) ----
   async function renderCustomerChat() {
     stopPolls();
     currentView = 'customerChat';
-    setHeader('💬 Soporte', true);
+    setHeader('💬 Soporte', false);
     app.innerHTML = \`
       <div id="messages"></div>
       <div id="composer">
@@ -2230,7 +2176,7 @@ function renderDashboardApp() {
       return;
     }
     if (me.isOperator) renderHome();
-    else renderCustomerHome();
+    else renderCustomerChat();
   }
   init();
 </script>
@@ -2290,7 +2236,7 @@ app.get('/support/api/whoami', requireAnyAuth, (req, res) => {
 app.get('/support/api/threads', requireOperatorAuth, (_req, res) => {
     const map = new Map();
     for (const [id, t] of supportThreads.entries()) {
-        map.set(id, { id, name: t.name, lastMessage: t.lastMessage, lastAt: t.lastAt, pendingDelivery: false, pendingConfirm: false });
+        map.set(id, { id, name: t.name, lastMessage: t.lastMessage, lastAt: t.lastAt, pendingDelivery: false, pendingConfirm: false, isChatThread: true });
     }
     for (const d of awaitingDelivery.values()) {
         const cid = String(d.customerChatId);
@@ -2299,7 +2245,7 @@ app.get('/support/api/threads', requireOperatorAuth, (_req, res) => {
             existing.pendingDelivery = true;
             existing.deliveryDescription = d.description;
         } else {
-            map.set(cid, { id: cid, name: `Cliente ${cid}`, lastMessage: `📦 Esperando entrega: ${d.description}`, lastAt: Date.now(), pendingDelivery: true, deliveryDescription: d.description, pendingConfirm: false });
+            map.set(cid, { id: cid, name: `Cliente ${cid}`, lastMessage: `📦 Esperando entrega: ${d.description}`, lastAt: Date.now(), pendingDelivery: true, deliveryDescription: d.description, pendingConfirm: false, isChatThread: false });
         }
     }
     for (const t of pendingTransfers.values()) {
@@ -2309,7 +2255,7 @@ app.get('/support/api/threads', requireOperatorAuth, (_req, res) => {
         if (existing) {
             existing.pendingConfirm = true;
         } else {
-            map.set(cid, { id: cid, name: `Cliente ${cid}`, lastMessage: `💳 Esperando confirmación de pago: ${t.description}`, lastAt: Date.now(), pendingDelivery: false, pendingConfirm: true });
+            map.set(cid, { id: cid, name: `Cliente ${cid}`, lastMessage: `💳 Esperando confirmación de pago: ${t.description}`, lastAt: Date.now(), pendingDelivery: false, pendingConfirm: true, isChatThread: false });
         }
     }
     res.json([...map.values()].sort((a, b) => b.lastAt - a.lastAt));
@@ -2408,87 +2354,31 @@ app.post('/support/api/my-thread/send', requireAnyAuth, (req, res) => {
     res.json({ ok: true });
 });
 
-// ── Tienda del cliente (comprar desde la mini app) ────────────────────────────
-app.get('/api/store/catalog', requireAnyAuth, (_req, res) => {
-    res.json({
-        open: storeOpen,
-        items: Object.entries(catalog.items).map(([id, p]) => ({ id, name: p.name, price: p.price }))
-    });
-});
-
-app.post('/api/store/buy', requireAnyAuth, (req, res) => {
-    if (!storeOpen) return res.status(403).json({ error: 'La tienda está cerrada por ahora.' });
-    const product = catalog.items[req.body?.productId];
-    if (!product) return res.status(404).json({ error: 'Producto no disponible.' });
-    const pendingId = savePending(product.price, product.name, null, req.user.id);
-    const methods = [];
-    if (stripe) methods.push({ key: 'stripe', label: '💳 Tarjeta (Stripe)' });
-    methods.push({ key: 'paddle', label: '🏦 PayPal (Paddle)' });
-    for (const [key, cfg] of Object.entries(PAYMENT_METHODS)) methods.push({ key, label: cfg.label });
-    res.json({ pendingId, amount: product.price, description: product.name, methods });
-});
-
-app.post('/api/store/pay/:pendingId/:method', requireAnyAuth, async (req, res) => {
-    const pending = pendingPayments.get(req.params.pendingId);
-    if (!pending) return res.status(404).json({ error: 'Solicitud expirada, vuelve a elegir el producto.' });
-    const { amount, description } = pending;
-    const method = req.params.method;
-
-    if (method === 'stripe' || method === 'paddle') {
-        try {
-            let url, txId;
-            if (method === 'stripe') {
-                const session = await createStripeCheckout(amount, description);
-                url = session.url; txId = session.id;
-            } else {
-                const tx = await createPaddleCheckout(amount, description);
-                url = tx.checkout?.url || `https://pay.paddle.com/checkout/${tx.id}`;
-                txId = tx.id;
-            }
-            saveCheckoutMeta(txId, { description, customerChatId: req.user.id, askChatId: ADMIN_CHAT_ID });
-            return res.json({ type: 'redirect', url });
-        } catch (err) {
-            return res.status(500).json({ error: err.message });
-        }
-    }
-
-    const methodCfg = PAYMENT_METHODS[method];
-    if (!methodCfg) return res.status(400).json({ error: 'Método inválido.' });
-    const methodText = loadMethodDetails(method);
-    if (!methodText) return res.status(409).json({ error: `${methodCfg.title} no está configurado todavía. Elige otro método.` });
-
-    const transferId = crypto.randomBytes(4).toString('hex');
-    pendingTransfers.set(transferId, { customerChatId: req.user.id, amount, description, operatorChatId: ADMIN_CHAT_ID, method });
-    setTimeout(() => { pendingTransfers.delete(transferId); persistTransfersState(); }, 24 * 60 * 60 * 1000);
-    transferByCustomer.set(req.user.id, { transferId, operatorChatId: ADMIN_CHAT_ID });
-    setTimeout(() => { transferByCustomer.delete(req.user.id); persistTransfersState(); }, 24 * 60 * 60 * 1000);
-    persistTransfersState();
-
-    let amountLine = `$${amount.toFixed(2)} USD`;
-    if (methodCfg.mxn) {
-        const mxnRate = await getMxnRate();
-        amountLine += ` ≈ $${(amount * mxnRate).toFixed(2)} MXN`;
-    }
-
-    res.json({ type: 'manual', label: methodCfg.label, amountLine, text: methodText, description });
-});
-
-// Confirmar un pago pendiente de un cliente, desde el dashboard (equivalente al botón "Confirmar pago recibido")
-app.post('/support/api/thread/:id/confirm-transfer', requireOperatorAuth, (req, res) => {
+// Confirmar el pago pendiente y entregar la cuenta en un solo paso (el comprobante ya llegó, entregar = confirmar)
+app.post('/support/api/thread/:id/confirm-and-deliver', requireOperatorAuth, async (req, res) => {
     const customerId = parseInt(req.params.id, 10);
+    const text = String(req.body?.text || '').trim();
+    if (!text) return res.status(400).json({ error: 'Vacío' });
+
     const entry = [...pendingTransfers.entries()].find(([, t]) => t.customerChatId === customerId);
     if (!entry) return res.status(404).json({ error: 'No hay pago pendiente de confirmar para este cliente.' });
     const [transferId, transfer] = entry;
 
+    const formatted = formatDelivery(text, transfer.description);
+    try {
+        await bot.sendMessage(customerId, formatted || text, formatted ? { parse_mode: 'HTML' } : {});
+    } catch (err) {
+        return res.status(502).json({ error: err.message });
+    }
+
     pendingTransfers.delete(transferId);
     transferByCustomer.delete(customerId);
-    const methodLabel = PAYMENT_METHODS[transfer.method]?.label || '🏧 Transferencia MXN';
-    recordSale({ date: new Date().toISOString(), method: transfer.method || 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId });
-    notifyAllOperators(`✅ ${methodLabel} confirmada (vía mini app) — $${parseFloat(transfer.amount).toFixed(2)} USD — ${transfer.description}`, {}, [req.operator.id]);
-
-    awaitingDelivery.set(req.operator.id, { customerChatId: customerId, description: transfer.description, txId: transferId });
     persistTransfersState();
-    pushSupportMessage(customerId, 'operator', `✅ Pago confirmado — $${parseFloat(transfer.amount).toFixed(2)} USD`);
+    const methodLabel = PAYMENT_METHODS[transfer.method]?.label || '🏧 Transferencia MXN';
+    recordSale({ date: new Date().toISOString(), method: transfer.method || 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId, account: text });
+    pushSupportMessage(customerId, 'operator', `📦 Cuenta entregada:\n${text}`);
+    notifyAllOperators(`✅ ${methodLabel} confirmada y entregada (vía mini app) — $${parseFloat(transfer.amount).toFixed(2)} USD — ${transfer.description}`, {}, [req.operator.id]);
+
     res.json({ ok: true });
 });
 
