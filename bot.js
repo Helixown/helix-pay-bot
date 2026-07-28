@@ -766,7 +766,7 @@ bot.on('callback_query', async (cq) => {
         bot.answerCallbackQuery(cq.id);
 
         const transferId = crypto.randomBytes(4).toString('hex');
-        pendingTransfers.set(transferId, { customerChatId, amount, description, operatorChatId: askChatId, method: methodKey });
+        pendingTransfers.set(transferId, { customerChatId, amount, description, operatorChatId: askChatId, method: methodKey, proofReceived: false });
         setTimeout(() => { pendingTransfers.delete(transferId); persistTransfersState(); }, 24 * 60 * 60 * 1000);
         if (customerChatId) {
             transferByCustomer.set(customerChatId, { transferId, operatorChatId: askChatId });
@@ -997,6 +997,11 @@ bot.on('message', async (msg) => {
     // Comprobante (foto/documento/texto) del cliente -> reenviar a TODOS los operadores; la accion (confirmar+entregar) se hace en la mini app
     const awaitingProof = transferByCustomer.get(chatId);
     if (awaitingProof && !(msg.text && msg.text.startsWith('/'))) {
+        const transfer = pendingTransfers.get(awaitingProof.transferId);
+        if (transfer && !transfer.proofReceived) {
+            transfer.proofReceived = true;
+            persistTransfersState();
+        }
         for (const opId of operadores) {
             bot.copyMessage(opId, chatId, msg.message_id)
                 .then(() => bot.sendMessage(opId, '💳 Comprobante recibido (arriba 👆). Ábrelo en Pedidos para confirmar y entregar la cuenta.', {
@@ -1833,13 +1838,13 @@ app.get('/support/api/threads', requireOperatorAuth, (_req, res) => {
         }
     }
     for (const t of pendingTransfers.values()) {
-        if (!t.customerChatId) continue;
+        if (!t.customerChatId || !t.proofReceived) continue; // sin comprobante todavia no hay nada que hacer, no cuenta como pedido
         const cid = String(t.customerChatId);
         const existing = map.get(cid);
         if (existing) {
             existing.pendingConfirm = true;
         } else {
-            map.set(cid, { id: cid, name: `Cliente ${cid}`, lastMessage: `💳 Esperando confirmación de pago: ${t.description}`, lastAt: Date.now(), pendingDelivery: false, pendingConfirm: true, isChatThread: false });
+            map.set(cid, { id: cid, name: `Cliente ${cid}`, lastMessage: `💳 Comprobante recibido: ${t.description}`, lastAt: Date.now(), pendingDelivery: false, pendingConfirm: true, isChatThread: false });
         }
     }
     res.json([...map.values()].sort((a, b) => b.lastAt - a.lastAt));
@@ -1848,7 +1853,7 @@ app.get('/support/api/threads', requireOperatorAuth, (_req, res) => {
 app.get('/support/api/thread/:id', requireOperatorAuth, (req, res) => {
     const t = supportThreads.get(req.params.id);
     const pendingDeliv = [...awaitingDelivery.values()].find(d => String(d.customerChatId) === req.params.id);
-    const pendingConf  = [...pendingTransfers.values()].find(tr => String(tr.customerChatId) === req.params.id);
+    const pendingConf  = [...pendingTransfers.values()].find(tr => String(tr.customerChatId) === req.params.id && tr.proofReceived);
     if (!t && !pendingDeliv && !pendingConf) return res.status(404).json({ error: 'No encontrado' });
     res.json({
         id: req.params.id,
@@ -1970,7 +1975,8 @@ app.post('/support/api/thread/:id/confirm-and-deliver', requireOperatorAuth, asy
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: 'Vacío' });
 
-    const entry = [...pendingTransfers.entries()].find(([, t]) => t.customerChatId === customerId);
+    const entries = [...pendingTransfers.entries()].filter(([, t]) => t.customerChatId === customerId);
+    const entry = entries.find(([, t]) => t.proofReceived) || entries[0];
     if (!entry) return res.status(404).json({ error: 'No hay pago pendiente de confirmar para este cliente.' });
     const [transferId, transfer] = entry;
 
@@ -2046,7 +2052,7 @@ app.post('/api/charge/:pendingId/:method', requireOperatorAuth, async (req, res)
     if (!methodText) return res.status(409).json({ error: `${methodCfg.title} no configurado.` });
 
     const transferId = crypto.randomBytes(4).toString('hex');
-    pendingTransfers.set(transferId, { customerChatId, amount, description, operatorChatId: req.operator.id, method });
+    pendingTransfers.set(transferId, { customerChatId, amount, description, operatorChatId: req.operator.id, method, proofReceived: false });
     setTimeout(() => { pendingTransfers.delete(transferId); persistTransfersState(); }, 24 * 60 * 60 * 1000);
     transferByCustomer.set(customerChatId, { transferId, operatorChatId: req.operator.id });
     setTimeout(() => { transferByCustomer.delete(customerChatId); persistTransfersState(); }, 24 * 60 * 60 * 1000);
