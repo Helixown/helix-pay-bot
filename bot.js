@@ -213,6 +213,10 @@ function metodoPagoPanel(pendingId, amount, description, showCatalogoBack) {
 
 const awaitingCanalPost = new Map(); // chatId del operador -> message_id del panel a editar, mientras espera el texto para el canal
 
+// ── Soporte (cliente <-> operadores) ──────────────────────────────────────────
+const openSupportChats = new Set(); // chatId del cliente con conversación de soporte abierta
+const supportMessages  = new Map(); // `${operatorChatId}:${messageId}` -> chatId del cliente (para responder con reply)
+
 // ── Transferencias manuales (MXN, Binance, AirTM) ─────────────────────────────
 // Persistido en disco para sobrevivir a reinicios entre que se manda el cobro y se confirma/entrega
 const awaitingMethodUpdate = new Map(); // chatId del operador -> { key, messageId } mientras espera el texto para actualizar un método de pago
@@ -540,6 +544,17 @@ bot.onText(/\/tienda/, (msg) => {
     sendTienda(msg.chat.id);
 });
 
+function openSupport(chatId) {
+    openSupportChats.add(chatId);
+    setTimeout(() => openSupportChats.delete(chatId), 24 * 60 * 60 * 1000);
+    bot.sendMessage(chatId, '💬 Escribe tu mensaje y te contestamos por aquí lo antes posible.');
+}
+
+bot.onText(/\/soporte/, (msg) => {
+    if (isAllowed(msg.chat.id)) return;
+    openSupport(msg.chat.id);
+});
+
 // Detecta cuando agregan/quitan al bot como admin de un canal, para el broadcast automático
 bot.on('my_chat_member', (update) => {
     const chat = update.chat;
@@ -762,6 +777,9 @@ ${stripe ? '✅' : '❌'} Stripe (tarjeta)
 /canales — ver canales donde el bot es admin (se detectan solos)
 /borrarcanal <code>[@canal] &lt;id_del_mensaje&gt;</code> — borra una publicación vieja
 
+<b>Soporte:</b>
+El cliente usa el botón "💬 Contactar soporte" (o /soporte); su mensaje les llega a todos los operadores. Responde con reply a ese mensaje para contestarle.
+
 <b>Ventas:</b>
 /ventas
 ${isAdmin ? `
@@ -822,7 +840,10 @@ bot.onText(/\/start(?:\s+(\S+))?/, (msg, match) => {
 Productos y servicios digitales, con pago 100% seguro (Stripe / PayPal).
 
 Toca el botón de abajo para ver el catálogo.`,
-            { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🛒 Ver catálogo', callback_data: 'open_tienda' }]] } }
+            { parse_mode: 'HTML', reply_markup: { inline_keyboard: [
+                [{ text: '🛒 Ver catálogo', callback_data: 'open_tienda' }],
+                [{ text: '💬 Contactar soporte', callback_data: 'open_support' }]
+            ] } }
         );
     }
 
@@ -864,6 +885,12 @@ bot.on('callback_query', async (cq) => {
     if (data === 'open_tienda') {
         bot.answerCallbackQuery(cq.id);
         return editTienda(chatId, cq.message.message_id);
+    }
+
+    if (data === 'open_support') {
+        bot.answerCallbackQuery(cq.id);
+        openSupport(chatId);
+        return;
     }
 
     if (data === 'back_tienda') {
@@ -1237,6 +1264,15 @@ bot.on('message', async (msg) => {
             }
             return;
         }
+
+        // Responder (reply) a un mensaje de soporte reenviado = contestarle al cliente
+        const supportCustomerId = supportMessages.get(`${chatId}:${msg.reply_to_message.message_id}`);
+        if (supportCustomerId) {
+            bot.copyMessage(supportCustomerId, chatId, msg.message_id)
+                .then(() => bot.sendMessage(chatId, '✅ Respuesta enviada al cliente.'))
+                .catch(() => bot.sendMessage(chatId, '⚠️ No se pudo enviar la respuesta al cliente.'));
+            return;
+        }
     }
 
     // Entrega de la cuenta/producto tras confirmar el pago -> mandar al cliente
@@ -1285,6 +1321,21 @@ bot.on('message', async (msg) => {
                         persistTransfersState();
                         setTimeout(() => { transferMessages.delete(`${opId}:${sent2.message_id}`); persistTransfersState(); }, 24 * 60 * 60 * 1000);
                     }
+                })
+                .catch(() => {});
+        }
+        return;
+    }
+
+    // Mensaje del cliente con soporte abierto -> reenviar a todos los operadores
+    if (openSupportChats.has(chatId) && !isAllowed(chatId) && !(msg.text && msg.text.startsWith('/'))) {
+        const who = msg.from?.username ? '@' + msg.from.username : (msg.from?.first_name || 'Cliente');
+        for (const opId of operadores) {
+            bot.copyMessage(opId, chatId, msg.message_id)
+                .then((sent) => {
+                    supportMessages.set(`${opId}:${sent.message_id}`, chatId);
+                    setTimeout(() => supportMessages.delete(`${opId}:${sent.message_id}`), 24 * 60 * 60 * 1000);
+                    return bot.sendMessage(opId, `💬 Mensaje de soporte de ${who} (arriba 👆). Responde a su mensaje para contestarle.`);
                 })
                 .catch(() => {});
         }
