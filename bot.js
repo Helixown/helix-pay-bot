@@ -231,6 +231,11 @@ function triggerDelivery(txId, description) {
     const meta = checkoutMeta.get(txId);
     if (!meta || !meta.customerChatId) return;
     const { customerChatId } = meta;
+    if (meta.payMessageChatId && meta.payMessageId) {
+        bot.editMessageText(`✅ <b>Pagado</b> — ${description}\n¡Gracias por tu compra! En breve te entregamos tu pedido.`, {
+            chat_id: meta.payMessageChatId, message_id: meta.payMessageId, parse_mode: 'HTML'
+        }).catch(() => {});
+    }
     for (const opId of operadores) {
         awaitingDelivery.set(opId, { customerChatId, description, txId });
     }
@@ -257,15 +262,14 @@ function savePending(amount, description, targetChatId, operatorChatId) {
 }
 
 function metodoPagoPanel(pendingId, amount, description, showCatalogoBack) {
-    const row1 = [];
-    if (stripe) row1.push({ text: '💳 Tarjeta / Apple Pay / Google Pay / Link', callback_data: `pay_s_${pendingId}` });
-    row1.push({ text: '🏦 PayPal (Paddle)', callback_data: `pay_p_${pendingId}` });
-    const keyboard = [
-        row1,
+    const keyboard = [];
+    if (stripe) keyboard.push([{ text: '💳 Tarjeta / Apple Pay / Google Pay / Link', callback_data: `pay_s_${pendingId}` }]);
+    keyboard.push(
+        [{ text: '🏦 PayPal (Paddle)', callback_data: `pay_p_${pendingId}` }],
         [{ text: '🏧 Transferencia MXN', callback_data: `pay_m_mxn_${pendingId}` }],
         [{ text: '🟡 Binance ID', callback_data: `pay_m_binance_${pendingId}` }, { text: '🔵 AirTM', callback_data: `pay_m_airtm_${pendingId}` }],
         [{ text: '🟣 Remitly', callback_data: `pay_m_remitly_${pendingId}` }]
-    ];
+    );
     if (showCatalogoBack) keyboard.push([{ text: '⬅️ Volver al catálogo', callback_data: 'back_tienda' }]);
     return { text: `💰 <b>$${parseFloat(amount).toFixed(2)} USD</b> — ${description}\nSelecciona método de pago:`, keyboard };
 }
@@ -916,7 +920,6 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
                 txId = tx.id;
             }
 
-            saveCheckoutMeta(txId, { description, customerChatId, askChatId });
             const linkId      = saveLink({ amount, description, method, url });
             const payPageUrl  = `${APP_BASE_URL}/pay/${linkId}`;
             const secureButton = { inline_keyboard: [
@@ -925,16 +928,21 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
             ] };
             const panelText = `💰 <b>$${parseFloat(amount).toFixed(2)} USD</b> — ${description}`;
 
-            await editOrSend(replyChatId, cq.message.message_id, panelText, { parse_mode: 'HTML', reply_markup: secureButton });
+            let payMessageChatId = null, payMessageId = null;
+            const sentMain = await editOrSend(replyChatId, cq.message.message_id, panelText, { parse_mode: 'HTML', reply_markup: secureButton });
+            if (replyChatId === customerChatId && sentMain?.message_id) { payMessageChatId = replyChatId; payMessageId = sentMain.message_id; }
 
             // La notificación al admin se manda desde el webhook, una vez que el pago se confirma de verdad (ver más abajo).
 
             if (targetChatId && targetChatId !== replyChatId) {
-                await bot.sendMessage(targetChatId,
+                const sentTarget = await bot.sendMessage(targetChatId,
                     `💰 <b>$${parseFloat(amount).toFixed(2)} USD</b> — ${description}`,
                     { parse_mode: 'HTML', reply_markup: secureButton }
                 ).catch(() => bot.sendMessage(replyChatId, `⚠️ No se pudo enviar al cliente (${targetChatId}). Reenvía tú el link.`));
+                if (customerChatId === targetChatId && sentTarget?.message_id) { payMessageChatId = targetChatId; payMessageId = sentTarget.message_id; }
             }
+
+            saveCheckoutMeta(txId, { description, customerChatId, askChatId, payMessageChatId, payMessageId });
         } catch (err) {
             const detail = err.response?.data?.error?.detail || err.message;
             await editOrSend(replyChatId, cq.message.message_id, `❌ Error: ${detail}`, { reply_markup: { inline_keyboard: [menuButtonRow(replyChatId)] } });
@@ -2073,12 +2081,12 @@ app.post('/api/charge/:pendingId/:method', requireOperatorAuth, async (req, res)
                 url = tx.checkout?.url || `https://pay.paddle.com/checkout/${tx.id}`;
                 txId = tx.id;
             }
-            saveCheckoutMeta(txId, { description, customerChatId, askChatId: req.operator.id });
             const linkId = saveLink({ amount, description, method, url });
             const payPageUrl = `${APP_BASE_URL}/pay/${linkId}`;
-            await bot.sendMessage(customerChatId, `💰 <b>$${amount.toFixed(2)} USD</b> — ${description}`, {
+            const sentPay = await bot.sendMessage(customerChatId, `💰 <b>$${amount.toFixed(2)} USD</b> — ${description}`, {
                 parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: 'Pagar', web_app: { url: payPageUrl } }]] }
             });
+            saveCheckoutMeta(txId, { description, customerChatId, askChatId: req.operator.id, payMessageChatId: customerChatId, payMessageId: sentPay?.message_id || null });
             return res.json({ ok: true, sentTo: customerChatId });
         } catch (err) {
             return res.status(500).json({ error: err.message });
@@ -2223,7 +2231,8 @@ app.delete('/api/operators/:id', requireOperatorAuth, requireAdminAuth, (req, re
 });
 
 app.get('/health',  (_req, res) => res.send('OK'));
-app.get('/success', (_req, res) => res.send('<h2>✅ Pago completado. Gracias por tu compra.</h2>'));
-app.get('/cancel',  (_req, res) => res.send('<h2>❌ Pago cancelado.</h2>'));
+const SIMPLE_PAGE_STYLE = 'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;text-align:center;padding:60px 20px;color:#111';
+app.get('/success', (_req, res) => res.send(`<body style="${SIMPLE_PAGE_STYLE}"><h2>✅ Pago completado</h2><p>Gracias por tu compra. Ya puedes cerrar esta pestaña y volver al chat de Telegram — ahí te confirmamos y te entregamos tu pedido.</p></body>`));
+app.get('/cancel',  (_req, res) => res.send(`<body style="${SIMPLE_PAGE_STYLE}"><h2>❌ Pago cancelado</h2><p>Puedes cerrar esta pestaña y volver al chat de Telegram para intentarlo de nuevo.</p></body>`));
 app.listen(PORT, () => console.log(`Pay bot server on port ${PORT}`));
 console.log('Pay bot started');
