@@ -1656,15 +1656,17 @@ function renderDashboardApp() {
           <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
             \${p.targets.map(t => \`
               <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-                <span class="sub">\${esc(t.title)}\${t.deleted ? ' — 🗑️ borrada' : ''}</span>
-                \${t.deleted ? '' : (t.url ? \`<a href="\${t.url}" target="_blank" style="font-size:12px">👀 Ver</a>\` : '')}
+                <span class="sub">\${esc(t.title)}</span>
+                <span style="display:flex;gap:10px;align-items:center">
+                  \${t.url ? \`<a href="\${t.url}" target="_blank" style="font-size:12px">👀 Ver</a>\` : ''}
+                  <button class="del-target" data-id="\${p.id}" data-ch="\${t.chId}" style="border:none;background:transparent;cursor:pointer;font-size:15px">🗑️</button>
+                </span>
               </div>\`).join('')}
           </div>
-          \${p.targets.some(t => !t.deleted) ? \`<button class="del-post secondary-btn" data-id="\${p.id}">🗑️ Borrar publicación</button>\` : ''}
         </div>\`).join('') : '<div class="empty">Sin publicaciones todavía.</div>';
-      box.querySelectorAll('.del-post').forEach(btn => btn.addEventListener('click', async () => {
-        if (!confirm('¿Borrar esta publicación de todos los canales donde sigue activa?')) return;
-        try { await api('/api/channels/posts/' + btn.dataset.id, { method: 'DELETE' }); loadChannelPosts(); }
+      box.querySelectorAll('.del-target').forEach(btn => btn.addEventListener('click', async () => {
+        if (!confirm('¿Borrar esta publicación de este canal?')) return;
+        try { await api('/api/channels/posts/' + btn.dataset.id + '/' + btn.dataset.ch, { method: 'DELETE' }); loadChannelPosts(); }
         catch (err) { alert(err.message); }
       }));
     } catch (err) { box.innerHTML = '<div class="err">' + esc(err.message) + '</div>'; }
@@ -2141,22 +2143,26 @@ app.post('/api/channels/post', requireOperatorAuth, async (req, res) => {
 });
 
 app.get('/api/channels/posts', requireOperatorAuth, (_req, res) => {
-    res.json([...channelPosts].reverse().slice(0, 20).map(p => ({
-        id: p.id,
-        date: p.date,
-        text: p.text,
-        targets: p.targets.map(t => ({ chId: t.chId, title: t.title, deleted: !!t.deleted, url: channelViewUrl(t.chId, { username: knownChannels.get(t.chId)?.username }, t.messageId) }))
-    })));
+    res.json([...channelPosts].reverse().slice(0, 20)
+        .map(p => ({
+            id: p.id,
+            date: p.date,
+            text: p.text,
+            targets: p.targets.filter(t => !t.deleted).map(t => ({ chId: t.chId, title: t.title, url: channelViewUrl(t.chId, { username: knownChannels.get(t.chId)?.username }, t.messageId) }))
+        }))
+        .filter(p => p.targets.length));
 });
 
-app.delete('/api/channels/posts/:id', requireOperatorAuth, async (req, res) => {
+app.delete('/api/channels/posts/:id/:chId', requireOperatorAuth, async (req, res) => {
     const post = channelPosts.find(p => p.id === req.params.id);
     if (!post) return res.status(404).json({ error: 'No encontrada.' });
-    for (const t of post.targets) {
-        if (t.deleted) continue;
-        try { await bot.deleteMessage(t.chId, t.messageId); t.deleted = true; } catch { /* puede que ya no exista */ t.deleted = true; }
+    const target = post.targets.find(t => t.chId === req.params.chId);
+    if (!target) return res.status(404).json({ error: 'No encontrada.' });
+    if (!target.deleted) {
+        try { await bot.deleteMessage(target.chId, target.messageId); } catch { /* puede que ya no exista */ }
+        target.deleted = true;
+        saveChannelPosts();
     }
-    saveChannelPosts();
     res.json({ ok: true });
 });
 
