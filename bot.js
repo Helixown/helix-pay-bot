@@ -501,83 +501,9 @@ ${methodLabel}
 }
 
 // ── Comandos ──────────────────────────────────────────────────────────────────
-bot.onText(/\/addoperador(?:\s+(\d+))?/, (msg, match) => {
-    if (msg.chat.id !== ADMIN_CHAT_ID) return;
-    const id = parseInt(match[1]);
-    if (!id) return bot.sendMessage(msg.chat.id, '❌ Uso: /addoperador <chatId>');
-    operadores.add(id);
-    saveOperadores();
-    bot.sendMessage(msg.chat.id, `✅ Operador <code>${id}</code> agregado.`, { parse_mode: 'HTML' });
-});
-
-bot.onText(/\/removeoperador(?:\s+(\d+))?/, (msg, match) => {
-    if (msg.chat.id !== ADMIN_CHAT_ID) return;
-    const id = parseInt(match[1]);
-    if (!id) return bot.sendMessage(msg.chat.id, '❌ Uso: /removeoperador <chatId>');
-    if (id === ADMIN_CHAT_ID) return bot.sendMessage(msg.chat.id, '❌ No puedes removerte a ti mismo.');
-    operadores.delete(id);
-    saveOperadores();
-    bot.sendMessage(msg.chat.id, `✅ Operador <code>${id}</code> removido.`, { parse_mode: 'HTML' });
-});
-
-bot.onText(/\/operadores/, (msg) => {
-    if (msg.chat.id !== ADMIN_CHAT_ID) return;
-    const lista = [...operadores].map(id => `• <code>${id}</code>${id === ADMIN_CHAT_ID ? ' (admin)' : ''}`).join('\n');
-    bot.sendMessage(msg.chat.id, `👥 <b>Operadores activos:</b>\n${lista}`, { parse_mode: 'HTML' });
-});
-
-bot.onText(/\/datosbancarios(?:\s+([\s\S]+))?/, async (msg, match) => {
-    if (!isAllowed(msg.chat.id)) return;
-    const chatId = msg.chat.id;
-    const inline = match[1] ? match[1].trim() : null;
-
-    if (inline) {
-        saveMethodDetails('mxn', inline);
-        return bot.sendMessage(chatId, `✅ Datos bancarios actualizados.\n\n${formatDetailLines(inline)}`, { parse_mode: 'HTML' });
-    }
-
-    const current = loadMethodDetails('mxn');
-    const sent = await bot.sendMessage(chatId,
-        (current ? `🏦 <b>Datos bancarios actuales:</b>\n\n${formatDetailLines(current)}\n\n` : '🏦 Aún no hay datos bancarios configurados.\n\n') +
-        'Envía en un solo mensaje los nuevos datos (CLABE, banco, titular) para actualizarlos.',
-        { parse_mode: 'HTML' }
-    );
-    clearAwaitingTextStates(chatId);
-    awaitingMethodUpdate.set(chatId, { key: 'mxn', messageId: sent.message_id });
-    setTimeout(() => awaitingMethodUpdate.delete(chatId), 30 * 60 * 1000);
-});
-
-bot.onText(/\/addproducto(?:\s+(.+))?/, (msg, match) => {
-    if (!isAllowed(msg.chat.id)) return;
-    const args  = (match[1] || '').trim().split(/\s+/);
-    const price = parseFloat(args[0]);
-    const name  = args.slice(1).join(' ');
-    if (!price || isNaN(price) || price <= 0 || !name) {
-        return bot.sendMessage(msg.chat.id, '❌ Uso: /addproducto <precio> <nombre>\nEjemplo: /addproducto 15 Cuenta Premium 1 mes');
-    }
-    const id = String(catalog.nextId++);
-    catalog.items[id] = { name, price };
-    saveCatalog();
-    bot.sendMessage(msg.chat.id, `✅ Producto agregado.\n🆔 <code>${id}</code>\n📦 ${name}\n💰 $${price.toFixed(2)} USD`, { parse_mode: 'HTML' });
-});
-
-bot.onText(/\/delproducto(?:\s+(\d+))?/, (msg, match) => {
-    if (!isAllowed(msg.chat.id)) return;
-    const id = match[1];
-    if (!id || !catalog.items[id]) return bot.sendMessage(msg.chat.id, '❌ Uso: /delproducto <id>\nUsa /listproductos para ver los IDs.');
-    const name = catalog.items[id].name;
-    delete catalog.items[id];
-    saveCatalog();
-    bot.sendMessage(msg.chat.id, `✅ Producto <code>${id}</code> (${name}) eliminado.`, { parse_mode: 'HTML' });
-});
-
-bot.onText(/\/listproductos/, (msg) => {
-    if (!isAllowed(msg.chat.id)) return;
-    const ids = Object.keys(catalog.items);
-    if (!ids.length) return bot.sendMessage(msg.chat.id, '📦 Catálogo vacío. Usa /addproducto <precio> <nombre>.');
-    const lista = ids.map(id => `• <code>${id}</code> — ${catalog.items[id].name} — $${catalog.items[id].price.toFixed(2)}`).join('\n');
-    bot.sendMessage(msg.chat.id, `📦 <b>Catálogo</b>\n${lista}`, { parse_mode: 'HTML' });
-});
+// Nota: la gestion de operadores, metodos de pago, catalogo, ventas, cobros y
+// canales para operadores/admin ahora vive en la mini app (/dashboard). Los
+// comandos clasicos equivalentes se quitaron para no duplicar el flujo.
 
 function customerWelcomePanel() {
     return {
@@ -589,7 +515,7 @@ Productos y servicios digitales, con pago 100% seguro (Stripe / PayPal).
 Toca el botón de abajo para ver el catálogo.`,
         keyboard: [
             [{ text: '🛒 Ver catálogo', callback_data: 'open_tienda' }],
-            [{ text: '💬 Contactar soporte', callback_data: 'open_support' }, { text: '🧪 Soporte (mini app)', web_app: { url: `${APP_BASE_URL}/dashboard` } }]
+            [{ text: '🎧 Soporte', web_app: { url: `${APP_BASE_URL}/dashboard` } }]
         ]
     };
 }
@@ -598,7 +524,7 @@ function tiendaPanel() {
     if (!storeOpen) return {
         text: '🔴 <b>JH STORE</b>\n━━━━━━━━━━━━━━\nEn este momento no estamos recibiendo pedidos. Vuelve más tarde 🙏',
         keyboard: [
-            [{ text: '💬 Contactar soporte', callback_data: 'open_support' }],
+            [{ text: '🎧 Soporte', web_app: { url: `${APP_BASE_URL}/dashboard` } }],
             [{ text: '⬅️ Menú', callback_data: 'customer_home' }]
         ]
     };
@@ -618,25 +544,6 @@ function editTienda(chatId, messageId) {
     const panel = tiendaPanel();
     return editOrSend(chatId, messageId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
 }
-
-bot.onText(/\/tienda/, (msg) => {
-    if (!isAllowed(msg.chat.id)) return;
-    sendTienda(msg.chat.id);
-});
-
-function openSupport(chatId, messageId) {
-    openSupportChats.add(chatId);
-    setTimeout(() => openSupportChats.delete(chatId), 24 * 60 * 60 * 1000);
-    const text = '💬 Escribe tu mensaje y te contestamos por aquí lo antes posible.';
-    const options = { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'customer_home' }]] } };
-    if (messageId) return editOrSend(chatId, messageId, text, options);
-    return bot.sendMessage(chatId, text, options);
-}
-
-bot.onText(/\/soporte/, (msg) => {
-    if (isAllowed(msg.chat.id)) return;
-    openSupport(msg.chat.id);
-});
 
 // Detecta cuando agregan/quitan al bot como admin de un canal, para el broadcast automático
 bot.on('my_chat_member', (update) => {
@@ -676,7 +583,7 @@ function channelViewUrl(chId, info, messageId) {
 
 async function postToChannel(fromChatId, text, editTarget) {
     const finalText = text.trim() || '🛒 Descubre nuestros productos y paga 100% seguro. Toca el botón para ir a la tienda.';
-    const menuButton = { text: '⬅️ Menú', callback_data: 'panel_home' };
+    const menuButton = { text: '📊 Abrir Dashboard', web_app: { url: `${APP_BASE_URL}/dashboard` } };
     const username = await getBotUsername().catch(() => null);
     const targets = channelTargets();
 
@@ -716,223 +623,12 @@ async function postToChannel(fromChatId, text, editTarget) {
     }
 }
 
-bot.onText(/\/promocanal(?:\s+([\s\S]+))?/, (msg, match) => {
-    if (!isAllowed(msg.chat.id)) return;
-    postToChannel(msg.chat.id, match[1] || '');
-});
 
-bot.onText(/\/canales/, (msg) => {
-    if (!isAllowed(msg.chat.id)) return;
-    if (!knownChannels.size) {
-        return bot.sendMessage(msg.chat.id, `📡 No hay canales detectados automáticamente todavía.\nAgrega el bot como admin (con permiso de publicar) a un canal y aparecerá aquí solo.\n\nRespaldo actual: ${CHANNEL_ID}`);
-    }
-    const lista = [...knownChannels.values()].map(c => `• ${c.title}`).join('\n');
-    bot.sendMessage(msg.chat.id, `📡 <b>Canales conectados</b>\n${lista}`, { parse_mode: 'HTML' });
-});
-
-bot.onText(/\/borrarcanal(?:\s+(\S+))?(?:\s+(\d+))?/, async (msg, match) => {
-    if (!isAllowed(msg.chat.id)) return;
-    let target = match[1];
-    let messageId = match[2];
-    if (target && !messageId && /^\d+$/.test(target)) {
-        // uso viejo: /borrarcanal <id_del_mensaje> (usa el canal de respaldo)
-        messageId = target;
-        target = CHANNEL_ID;
-    }
-    if (!target || !messageId) {
-        return bot.sendMessage(msg.chat.id, '❌ Uso: /borrarcanal [@canal o chatId] <id_del_mensaje>\nSin especificar canal, usa /canales para ver los conectados y el botón "🗑️ Borrar en..." de cada publicación.');
-    }
-    try {
-        await bot.deleteMessage(target, messageId);
-        bot.sendMessage(msg.chat.id, `🗑️ Publicación <code>${messageId}</code> borrada de ${target}.`, { parse_mode: 'HTML' });
-    } catch (err) {
-        bot.sendMessage(msg.chat.id, `❌ No se pudo borrar: ${err.message}`);
-    }
-});
-
-function ventasPanel() {
-    if (!sales.length) return { text: '📊 Aún no hay ventas registradas.', keyboard: [] };
-    const total = sales.reduce((sum, s) => sum + s.amount, 0);
-    const text =
-`📊 <b>Ventas</b>
-━━━━━━━━━━━━━━
-🧾 Vendidas: <b>${sales.length}</b>
-💰 Total generado: <b>$${total.toFixed(2)} USD</b>`;
-    return { text, keyboard: [
-        [{ text: '🧾 Ver / borrar una venta', callback_data: 'panel_ventas_lista' }],
-        [{ text: '🗑️ Reiniciar contador', callback_data: 'reset_ventas_ask' }]
-    ] };
-}
-
-function ventasListaPanel() {
-    if (!sales.length) return { text: '📊 No hay ventas registradas.', keyboard: [] };
-    const recent = sales.map((s, idx) => ({ ...s, idx })).slice(-10).reverse();
-    const keyboard = recent.map(s => {
-        const desc = String(s.description).slice(0, 20);
-        return [{ text: `🗑️ ${s.date.slice(0, 10)} — $${s.amount.toFixed(2)} — ${desc}`, callback_data: `del_venta_${s.idx}` }];
-    });
-    return { text: '📊 <b>Últimas ventas</b>\n━━━━━━━━━━━━━━\nToca una para borrarla (uso: testing/corrección):', keyboard };
-}
-
-function sendVentas(chatId) {
-    const panel = ventasPanel();
-    bot.sendMessage(chatId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
-}
-
-// ── Panel de operador ─────────────────────────────────────────────────────────
-function catalogoAdminPanel() {
-    const ids = Object.keys(catalog.items);
-    const lista = ids.length
-        ? ids.map(id => `• <code>${id}</code> — ${catalog.items[id].name} — $${catalog.items[id].price.toFixed(2)}`).join('\n')
-        : 'Catálogo vacío.';
-    const text =
-`🛒 <b>Catálogo</b>
-━━━━━━━━━━━━━━
-${lista}
-
-<b>Comandos:</b>
-/addproducto <code>&lt;precio&gt; &lt;nombre&gt;</code>
-/delproducto <code>&lt;id&gt;</code>
-/tienda — vista del cliente`;
-    return { text, keyboard: [] };
-}
-
-function cobrarPanel() {
-    const text =
-`💰 <b>Cobrar</b>
-━━━━━━━━━━━━━━
-/cobrar <code>&lt;monto&gt; [descripción] [chatId]</code>
-
-<b>Ejemplos:</b>
-<code>/cobrar 50</code>
-<code>/cobrar 50 10 cuentas premium</code>
-<code>/cobrar 50 10 cuentas 123456789</code>`;
-    return { text, keyboard: [] };
-}
-
-function metodosPanel() {
-    const rows = Object.entries(PAYMENT_METHODS).map(([key, cfg]) => [{ text: cfg.label, callback_data: `panel_metodo_${key}` }]);
-    return { text: '💳 <b>Métodos de pago manuales</b>\n━━━━━━━━━━━━━━\nElige uno para ver o actualizar sus datos:', keyboard: rows };
-}
-
-function metodoDetallePanel(key) {
-    const cfg = PAYMENT_METHODS[key];
-    const current = loadMethodDetails(key);
-    const text = current
-        ? `${cfg.label}\n━━━━━━━━━━━━━━\n${formatDetailLines(current)}`
-        : `${cfg.label}\n━━━━━━━━━━━━━━\n⚠️ Aún no configurado.`;
-    return { text, keyboard: [[{ text: '✏️ Actualizar', callback_data: `panel_metodo_edit_${key}` }]] };
-}
-
-function soportePanel() {
-    if (!supportThreads.size) return { text: '💬 <b>Soporte</b>\n━━━━━━━━━━━━━━\nNo hay conversaciones abiertas.', keyboard: [] };
-    const entries = [...supportThreads.entries()].sort((a, b) => b[1].lastAt - a[1].lastAt);
-    const keyboard = entries.map(([custId, t]) => {
-        const preview = String(t.lastMessage || '').slice(0, 30);
-        return [{ text: `👤 ${t.name} — ${preview}`, callback_data: `soporte_abrir_${custId}` }];
-    });
-    return { text: '💬 <b>Soporte</b>\n━━━━━━━━━━━━━━\nConversaciones abiertas, toca una para responder:', keyboard };
-}
-
-function soporteHiloPanel(custId) {
-    const t = supportThreads.get(String(custId));
-    if (!t) return { text: '💬 Esta conversación ya no está abierta.', keyboard: [] };
-    const esc = (s) => String(s).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
-    const text =
-`💬 <b>${esc(t.name)}</b>
-━━━━━━━━━━━━━━
-"${esc(t.lastMessage)}"
-
-Escribe tu respuesta directamente (sin reply), se le manda al cliente.`;
-    return { text, keyboard: [[{ text: '✅ Marcar resuelto', callback_data: `soporte_cerrar_${custId}` }]] };
-}
-
-function operadoresPanel() {
-    const lista = [...operadores].map(id => `• <code>${id}</code>${id === ADMIN_CHAT_ID ? ' (admin)' : ''}`).join('\n');
-    const text =
-`👥 <b>Operadores</b>
-━━━━━━━━━━━━━━
-${lista}
-
-<b>Comandos:</b>
-/addoperador <code>&lt;chatId&gt;</code>
-/removeoperador <code>&lt;chatId&gt;</code>`;
-    return { text, keyboard: [] };
-}
-
-function comandosPanel(isAdmin) {
-    const text =
-`📖 <b>Todos los comandos</b>
-━━━━━━━━━━━━━━
-${stripe ? '✅' : '❌'} Stripe (tarjeta)
-
-<b>Cobros:</b>
-/cobrar <code>&lt;monto&gt; [descripción] [chatId]</code>
-
-<b>Métodos de pago manuales:</b>
-/datosbancarios <code>[CLABE / banco / titular]</code>
-(Binance ID y AirTM se configuran desde el botón "💳 Métodos de pago" del menú)
-
-<b>Catálogo (tienda pública /tienda):</b>
-/addproducto <code>&lt;precio&gt; &lt;nombre&gt;</code>
-/listproductos
-/delproducto <code>&lt;id&gt;</code>
-
-<b>Promoción:</b>
-/promocanal <code>[texto]</code> — publica en todos los canales conectados
-/canales — ver canales donde el bot es admin (se detectan solos)
-/borrarcanal <code>[@canal] &lt;id_del_mensaje&gt;</code> — borra una publicación vieja
-
-<b>Soporte:</b>
-El cliente usa el botón "💬 Contactar soporte" (o /soporte); su mensaje les llega a todos los operadores. Responde con reply a ese mensaje para contestarle.
-
-<b>Ventas:</b>
-/ventas
-${isAdmin ? `
-<b>Operadores:</b>
-/addoperador <code>&lt;chatId&gt;</code>
-/removeoperador <code>&lt;chatId&gt;</code>
-/operadores` : ''}`;
-    return { text, keyboard: [] };
-}
-
-function operatorHomePanel(isAdmin) {
-    const text =
-`💳 <b>Pay Bot</b> — Panel de operador
-━━━━━━━━━━━━━━
-${stripe ? '✅' : '❌'} Stripe (tarjeta)
-
-Elige una opción:`;
-    const keyboard = [
-        [{ text: '🛒 Catálogo', callback_data: 'panel_catalogo' }, { text: '📊 Ventas', callback_data: 'panel_ventas' }],
-        [{ text: '💰 Cobrar', callback_data: 'panel_cobrar' }, { text: '💳 Métodos de pago', callback_data: 'panel_metodos' }],
-        [{ text: storeOpen ? '🟢 Tienda: Abierta' : '🔴 Tienda: Cerrada', callback_data: 'toggle_store' }],
-        [{ text: `💬 Soporte${supportThreads.size ? ` (${supportThreads.size})` : ''}`, callback_data: 'panel_soporte' }, { text: '🧪 Dashboard (mini app)', web_app: { url: `${APP_BASE_URL}/dashboard` } }],
-        [{ text: '📢 Promocionar', callback_data: 'panel_promocionar' }]
-    ];
-    if (isAdmin) keyboard.push([{ text: '👥 Operadores', callback_data: 'panel_operadores' }]);
-    keyboard.push([{ text: '📖 Todos los comandos', callback_data: 'panel_comandos' }]);
-    return { text, keyboard };
-}
-
-function withBack(keyboard) {
-    return [...keyboard, [{ text: '⬅️ Menú', callback_data: 'panel_home' }]];
-}
-
-// Botón de regreso correcto según quién esté viendo el mensaje (operador -> panel; cliente -> bienvenida)
+// Botón de regreso correcto según quién esté viendo el mensaje (operador -> dashboard; cliente -> bienvenida)
 function menuButtonRow(chatId) {
-    return [{ text: '⬅️ Menú', callback_data: isAllowed(chatId) ? 'panel_home' : 'customer_home' }];
+    if (isAllowed(chatId)) return [{ text: '📊 Abrir Dashboard', web_app: { url: `${APP_BASE_URL}/dashboard` } }];
+    return [{ text: '⬅️ Menú', callback_data: 'customer_home' }];
 }
-
-function editPanel(chatId, messageId, panel) {
-    const keyboard = withBack(panel.keyboard);
-    return editOrSend(chatId, messageId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
-}
-
-bot.onText(/\/ventas/, (msg) => {
-    if (!isAllowed(msg.chat.id)) return;
-    sendVentas(msg.chat.id);
-});
 
 bot.onText(/\/start(?:\s+(\S+))?/, (msg, match) => {
     const chatId  = msg.chat.id;
@@ -951,34 +647,10 @@ bot.onText(/\/start(?:\s+(\S+))?/, (msg, match) => {
         return bot.sendMessage(chatId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
     }
 
-    const isAdmin = msg.chat.id === ADMIN_CHAT_ID;
-    const panel = operatorHomePanel(isAdmin);
-    bot.sendMessage(msg.chat.id, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
-});
-
-bot.onText(/\/cobrar(?:\s+(.+))?/, async (msg, match) => {
-    const chatId = msg.chat.id;
-    if (!isAllowed(chatId)) return;
-
-    const args = (match[1] || '').trim().split(/\s+/);
-    const amount = args[0];
-
-    if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
-        return bot.sendMessage(chatId, '❌ Uso: /cobrar <monto> [descripción] [chatId]\nEjemplo: /cobrar 50 10 cuentas');
-    }
-
-    let targetChatId = null;
-    let descParts = args.slice(1);
-    const last = descParts[descParts.length - 1];
-    if (last && /^\d{5,}$/.test(last)) {
-        targetChatId = parseInt(last);
-        descParts = descParts.slice(0, -1);
-    }
-    const description = descParts.join(' ') || 'Pedido personalizado';
-    const pendingId   = savePending(amount, description, targetChatId, chatId);
-    const panel       = metodoPagoPanel(pendingId, amount, description, false);
-
-    await bot.sendMessage(chatId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
+    bot.sendMessage(chatId, '💳 <b>Pay Bot</b>\n━━━━━━━━━━━━━━\nToca el botón para abrir el panel.', {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '📊 Abrir Dashboard', web_app: { url: `${APP_BASE_URL}/dashboard` } }]] }
+    });
 });
 
 // ── Callbacks ─────────────────────────────────────────────────────────────────
@@ -989,12 +661,6 @@ bot.on('callback_query', async (cq) => {
     if (data === 'open_tienda') {
         bot.answerCallbackQuery(cq.id);
         return editTienda(chatId, cq.message.message_id);
-    }
-
-    if (data === 'open_support') {
-        bot.answerCallbackQuery(cq.id);
-        openSupport(chatId, cq.message.message_id);
-        return;
     }
 
     if (data === 'customer_home') {
@@ -1009,90 +675,6 @@ bot.on('callback_query', async (cq) => {
         return editTienda(chatId, cq.message.message_id);
     }
 
-    if (data === 'panel_home') {
-        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
-        bot.answerCallbackQuery(cq.id);
-        const panel = operatorHomePanel(chatId === ADMIN_CHAT_ID);
-        return editOrSend(chatId, cq.message.message_id, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
-    }
-
-    if (data === 'panel_catalogo') {
-        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
-        bot.answerCallbackQuery(cq.id);
-        return editPanel(chatId, cq.message.message_id, catalogoAdminPanel());
-    }
-
-    if (data === 'panel_ventas') {
-        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
-        bot.answerCallbackQuery(cq.id);
-        return editPanel(chatId, cq.message.message_id, ventasPanel());
-    }
-
-    if (data === 'panel_ventas_lista') {
-        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
-        bot.answerCallbackQuery(cq.id);
-        return editPanel(chatId, cq.message.message_id, ventasListaPanel());
-    }
-
-    if (data.startsWith('del_venta_')) {
-        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
-        const idx = parseInt(data.replace('del_venta_', ''), 10);
-        if (isNaN(idx) || idx < 0 || idx >= sales.length) {
-            bot.answerCallbackQuery(cq.id, { text: '❌ Ya no existe.' });
-            return editPanel(chatId, cq.message.message_id, ventasListaPanel());
-        }
-        sales.splice(idx, 1);
-        fs.writeFileSync(SALES_FILE, JSON.stringify(sales, null, 2));
-        bot.answerCallbackQuery(cq.id, { text: '🗑️ Venta borrada.' });
-        return editPanel(chatId, cq.message.message_id, ventasListaPanel());
-    }
-
-    if (data === 'panel_cobrar') {
-        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
-        bot.answerCallbackQuery(cq.id);
-        return editPanel(chatId, cq.message.message_id, cobrarPanel());
-    }
-
-    if (data === 'panel_metodos') {
-        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
-        bot.answerCallbackQuery(cq.id);
-        return editPanel(chatId, cq.message.message_id, metodosPanel());
-    }
-
-    if (data.startsWith('panel_metodo_edit_')) {
-        const key = data.replace('panel_metodo_edit_', '');
-        if (!isAllowed(chatId) || !PAYMENT_METHODS[key]) return bot.answerCallbackQuery(cq.id);
-        bot.answerCallbackQuery(cq.id);
-        const cfg = PAYMENT_METHODS[key];
-        const result = await editOrSend(chatId, cq.message.message_id, `✏️ Envía en un solo mensaje los nuevos datos para ${cfg.label}.`,
-            { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
-        );
-        clearAwaitingTextStates(chatId);
-        awaitingMethodUpdate.set(chatId, { key, messageId: result?.message_id || cq.message.message_id });
-        setTimeout(() => awaitingMethodUpdate.delete(chatId), 30 * 60 * 1000);
-        return;
-    }
-
-    if (data.startsWith('panel_metodo_')) {
-        const key = data.replace('panel_metodo_', '');
-        if (!isAllowed(chatId) || !PAYMENT_METHODS[key]) return bot.answerCallbackQuery(cq.id);
-        bot.answerCallbackQuery(cq.id);
-        return editPanel(chatId, cq.message.message_id, metodoDetallePanel(key));
-    }
-
-    if (data === 'panel_promocionar') {
-        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
-        bot.answerCallbackQuery(cq.id);
-        const chCount = knownChannels.size || 1;
-        const result = await editOrSend(chatId, cq.message.message_id, `📢 Envía el texto que quieres publicar (se manda a ${chCount} canal${chCount > 1 ? 'es' : ''}).`,
-            { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
-        );
-        clearAwaitingTextStates(chatId);
-        awaitingCanalPost.set(chatId, result?.message_id || cq.message.message_id);
-        setTimeout(() => awaitingCanalPost.delete(chatId), 30 * 60 * 1000);
-        return;
-    }
-
     if (data.startsWith('del_canal_')) {
         if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
         const [canalChatId, canalMessageId] = data.replace('del_canal_', '').split(':');
@@ -1100,99 +682,15 @@ bot.on('callback_query', async (cq) => {
             await bot.deleteMessage(canalChatId, canalMessageId);
             bot.answerCallbackQuery(cq.id, { text: '🗑️ Publicación borrada.' });
             await editOrSend(chatId, cq.message.message_id, `🗑️ Publicación borrada de ${knownChannels.get(canalChatId)?.title || canalChatId}.`,
-                { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
+                { reply_markup: { inline_keyboard: [menuButtonRow(chatId)] } }
             );
         } catch (err) {
             bot.answerCallbackQuery(cq.id, { text: '❌ No se pudo borrar.' });
             await editOrSend(chatId, cq.message.message_id, `❌ No se pudo borrar la publicación: ${err.message}`,
-                { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
+                { reply_markup: { inline_keyboard: [menuButtonRow(chatId)] } }
             );
         }
         return;
-    }
-
-    if (data === 'toggle_store') {
-        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
-        storeOpen = !storeOpen;
-        saveStoreStatus();
-        bot.answerCallbackQuery(cq.id, { text: storeOpen ? '🟢 Tienda abierta.' : '🔴 Tienda cerrada.' });
-        const panel = operatorHomePanel(chatId === ADMIN_CHAT_ID);
-        return editOrSend(chatId, cq.message.message_id, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
-    }
-
-    if (data === 'panel_soporte') {
-        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
-        bot.answerCallbackQuery(cq.id);
-        return editPanel(chatId, cq.message.message_id, soportePanel());
-    }
-
-    if (data.startsWith('soporte_abrir_')) {
-        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
-        const custId = data.replace('soporte_abrir_', '');
-        if (!supportThreads.has(custId)) {
-            bot.answerCallbackQuery(cq.id, { text: '❌ Ya no está disponible.' });
-            return editPanel(chatId, cq.message.message_id, soportePanel());
-        }
-        bot.answerCallbackQuery(cq.id);
-        clearAwaitingTextStates(chatId);
-        setSupportReplyTo(chatId, parseInt(custId, 10));
-        return editPanel(chatId, cq.message.message_id, soporteHiloPanel(custId));
-    }
-
-    if (data.startsWith('soporte_cerrar_')) {
-        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
-        const custId = data.replace('soporte_cerrar_', '');
-        supportThreads.delete(custId);
-        persistSupportThreads();
-        openSupportChats.delete(parseInt(custId, 10));
-        for (const [opId, cId] of awaitingSupportReplyTo) {
-            if (String(cId) === custId) awaitingSupportReplyTo.delete(opId);
-        }
-        bot.answerCallbackQuery(cq.id, { text: '✅ Marcado como resuelto.' });
-        bot.sendMessage(parseInt(custId, 10), 'Tu conversación con soporte se marcó como resuelta. Si necesitas algo más, toca "💬 Contactar soporte" de nuevo.', {
-            reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'customer_home' }]] }
-        }).catch(() => {});
-        return editPanel(chatId, cq.message.message_id, soportePanel());
-    }
-
-    if (data === 'panel_operadores') {
-        if (chatId !== ADMIN_CHAT_ID) return bot.answerCallbackQuery(cq.id);
-        bot.answerCallbackQuery(cq.id);
-        return editPanel(chatId, cq.message.message_id, operadoresPanel());
-    }
-
-    if (data === 'panel_comandos') {
-        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
-        bot.answerCallbackQuery(cq.id);
-        return editPanel(chatId, cq.message.message_id, comandosPanel(chatId === ADMIN_CHAT_ID));
-    }
-
-    if (data === 'reset_ventas_ask') {
-        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
-        bot.answerCallbackQuery(cq.id);
-        return bot.sendMessage(chatId, '⚠️ ¿Seguro que quieres reiniciar el contador de ventas a 0? Esto no se puede deshacer.', {
-            reply_markup: { inline_keyboard: [[
-                { text: '✅ Sí, reiniciar', callback_data: 'reset_ventas_confirm' },
-                { text: '❌ Cancelar', callback_data: 'reset_ventas_cancel' }
-            ]] }
-        });
-    }
-
-    if (data === 'reset_ventas_confirm') {
-        if (!isAllowed(chatId)) return bot.answerCallbackQuery(cq.id);
-        sales.length = 0;
-        fs.writeFileSync(SALES_FILE, JSON.stringify(sales, null, 2));
-        bot.answerCallbackQuery(cq.id, { text: '✅ Contador reiniciado.' });
-        return editOrSend(chatId, cq.message.message_id, '✅ Contador de ventas reiniciado a 0.',
-            { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
-        );
-    }
-
-    if (data === 'reset_ventas_cancel') {
-        bot.answerCallbackQuery(cq.id, { text: 'Cancelado.' });
-        return editOrSend(chatId, cq.message.message_id, '❌ Reinicio cancelado, el contador sigue igual.',
-            { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'panel_home' }]] } }
-        );
     }
 
     if (data.startsWith('buy_')) {
@@ -1336,8 +834,8 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
         const pending   = pendingPayments.get(pendingId);
 
         if (!pending) {
-            bot.answerCallbackQuery(cq.id, { text: '❌ Solicitud expirada. Usa /cobrar de nuevo.' });
-            return editOrSend(chatId, cq.message.message_id, '❌ Solicitud expirada. Usa /cobrar de nuevo.', { reply_markup: { inline_keyboard: [menuButtonRow(chatId)] } });
+            bot.answerCallbackQuery(cq.id, { text: '❌ Solicitud expirada.' });
+            return editOrSend(chatId, cq.message.message_id, '❌ Solicitud expirada.', { reply_markup: { inline_keyboard: [menuButtonRow(chatId)] } });
         }
 
         bot.answerCallbackQuery(cq.id, { text: '⏳ Generando link...' });
@@ -1496,8 +994,8 @@ bot.on('message', async (msg) => {
                 .then((sent) => {
                     supportMessages.set(`${opId}:${sent.message_id}`, chatId);
                     setTimeout(() => supportMessages.delete(`${opId}:${sent.message_id}`), 24 * 60 * 60 * 1000);
-                    return bot.sendMessage(opId, `💬 Mensaje de soporte de ${who} (arriba 👆). Responde a su mensaje, o usa el botón para contestarle desde el panel.`, {
-                        reply_markup: { inline_keyboard: [[{ text: '💬 Abrir chat', callback_data: `soporte_abrir_${chatId}` }]] }
+                    return bot.sendMessage(opId, `💬 Mensaje de soporte de ${who} (arriba 👆). Ábrelo en Soporte para contestarle.`, {
+                        reply_markup: { inline_keyboard: [[{ text: '🎧 Abrir Soporte', web_app: { url: `${APP_BASE_URL}/dashboard` } }]] }
                     });
                 })
                 .catch(() => {});
@@ -2372,7 +1870,7 @@ app.post('/support/api/my-thread/send', requireAnyAuth, (req, res) => {
         const alreadyOpen = awaitingSupportReplyTo.get(opId) === req.user.id;
         if (alreadyOpen) { setSupportReplyTo(opId, req.user.id); continue; }
         bot.sendMessage(opId, `💬 Mensaje de soporte de ${who} (vía mini app).`, {
-            reply_markup: { inline_keyboard: [[{ text: '💬 Abrir chat', callback_data: `soporte_abrir_${req.user.id}` }]] }
+            reply_markup: { inline_keyboard: [[{ text: '🎧 Abrir Soporte', web_app: { url: `${APP_BASE_URL}/dashboard` } }]] }
         }).catch(() => {});
     }
     res.json({ ok: true });
