@@ -19,7 +19,9 @@ const APP_BASE_URL          = process.env.APP_BASE_URL || 'https://helix-pay-bot
 const CHANNEL_ID            = process.env.CHANNEL_ID || '@Cuentasonlyfans23k';
 const PORT                  = process.env.PORT || 3000;
 
-const bot    = new TelegramBot(BOT_TOKEN, { polling: true });
+const bot    = new TelegramBot(BOT_TOKEN, {
+    polling: { params: { allowed_updates: ['message', 'callback_query', 'my_chat_member'] } }
+});
 const app    = express();
 const stripe = STRIPE_SECRET_KEY ? Stripe(STRIPE_SECRET_KEY) : null;
 
