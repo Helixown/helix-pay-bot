@@ -2395,7 +2395,9 @@ app.post('/support/api/thread/:id/confirm-and-deliver', requireOperatorAuth, asy
         return res.status(502).json({ error: err.message });
     }
 
-    pendingTransfers.delete(transferId);
+    for (const [tid, t] of [...pendingTransfers.entries()]) {
+        if (t.customerChatId === customerId) pendingTransfers.delete(tid);
+    }
     transferByCustomer.delete(customerId);
     for (const [opId, d] of [...awaitingDelivery.entries()]) {
         if (d.customerChatId === customerId) awaitingDelivery.delete(opId);
