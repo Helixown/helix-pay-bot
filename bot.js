@@ -218,7 +218,9 @@ function triggerDelivery(txId, description) {
         }
         persistTransfersState();
     }, 30 * 60 * 1000);
-    notifyAllOperators('✏️ Pago confirmado — escribe la cuenta a entregar (formato correo:contraseña).', {}, []);
+    notifyAllOperators('📦 Pago confirmado — ábrelo en Pedidos para entregar la cuenta.', {
+        reply_markup: { inline_keyboard: [[{ text: '🧾 Abrir Pedidos', web_app: { url: `${APP_BASE_URL}/dashboard` } }]] }
+    }, []);
 }
 
 // ── Pending payments (in-memory) ─────────────────────────────────────────────
