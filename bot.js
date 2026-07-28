@@ -1809,7 +1809,7 @@ function renderDashboardApp() {
         <button class="tile" data-v="catalog">🛒<div>Catálogo</div></button>
         <button class="tile" data-v="sales">📊<div>Ventas</div></button>
         <button class="tile" data-v="methods">💳<div>Métodos</div></button>
-        <button class="tile" data-v="clients">💬<div>Soporte</div></button>
+        <button class="tile" data-v="clients">🎧<div>Soporte</div></button>
         <button class="tile" data-v="orders">🧾<div>Pedidos</div></button>
         <button class="tile" data-v="channels">📢<div>Canales</div></button>
         <button class="tile" data-v="charge">💰<div>Cobrar</div></button>
@@ -1945,7 +1945,7 @@ function renderDashboardApp() {
   async function renderClients() {
     stopPolls();
     currentView = 'clients';
-    setHeader('💬 Soporte', true);
+    setHeader('🎧 Soporte', true);
     app.innerHTML = '<div class="empty">Cargando…</div>';
     await loadClientsList(t => t.isChatThread, 'No hay conversaciones abiertas.');
     listPoll = setInterval(() => { if (currentView === 'clients') loadClientsList(t => t.isChatThread, 'No hay conversaciones abiertas.'); }, 5000);
@@ -2154,7 +2154,7 @@ function renderDashboardApp() {
   async function renderCustomerChat() {
     stopPolls();
     currentView = 'customerChat';
-    setHeader('💬 Soporte', false);
+    setHeader('🎧 Soporte', false);
     app.innerHTML = \`
       <div id="messages"></div>
       <div id="composer">
