@@ -496,7 +496,7 @@ async function createPaddleCheckout(amount, description) {
 
 async function createStripeCheckout(amount, description) {
     const session = await stripe.checkout.sessions.create({
-        automatic_payment_methods: { enabled: true }, // deja que Stripe muestre Apple Pay / Google Pay / Link segun lo habilitado en el dashboard
+        // sin payment_method_types: Checkout Session muestra sola lo que este habilitado en el dashboard (tarjeta, Apple Pay, Google Pay, Link)
         line_items: [{
             price_data: {
                 currency: 'usd',
