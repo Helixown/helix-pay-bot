@@ -202,6 +202,30 @@ function notifyAllOperators(text, options = {}, exclude = []) {
     }
 }
 
+// Igual que notifyAllOperators, pero guarda los mensajes para poder editarlos despues (ej. cuando ya se entrego la cuenta)
+const pendingActionMessages = new Map(); // customerChatId -> [{ opId, messageId }]
+function notifyAllOperatorsTracked(customerChatId, text, options = {}, exclude = []) {
+    for (const opId of operadores) {
+        if (exclude.includes(opId)) continue;
+        bot.sendMessage(opId, text, options)
+            .then(sent => {
+                const list = pendingActionMessages.get(customerChatId) || [];
+                list.push({ opId, messageId: sent.message_id });
+                pendingActionMessages.set(customerChatId, list);
+            })
+            .catch(() => {});
+    }
+}
+// Marca como resueltos los avisos de "hay que entregar" de este cliente (edita el texto y quita el boton)
+function resolveActionMessages(customerChatId, finalText) {
+    const list = pendingActionMessages.get(customerChatId);
+    if (!list) return;
+    pendingActionMessages.delete(customerChatId);
+    for (const { opId, messageId } of list) {
+        bot.editMessageText(finalText, { chat_id: opId, message_id: messageId }).catch(() => {});
+    }
+}
+
 // Tras confirmarse un pago (Stripe/Paddle), pide la cuenta a entregar a TODOS los operadores (cualquiera puede entregar)
 function triggerDelivery(txId, description) {
     const meta = checkoutMeta.get(txId);
@@ -218,7 +242,7 @@ function triggerDelivery(txId, description) {
         }
         persistTransfersState();
     }, 30 * 60 * 1000);
-    notifyAllOperators('📦 Pago confirmado — ábrelo en Pedidos para entregar la cuenta.', {
+    notifyAllOperatorsTracked(customerChatId, '📦 Pago confirmado — ábrelo en Pedidos para entregar la cuenta.', {
         reply_markup: { inline_keyboard: [[{ text: '🧾 Abrir Pedidos', web_app: { url: `${APP_BASE_URL}/dashboard` } }]] }
     }, []);
 }
@@ -432,7 +456,10 @@ function renderPayPage({ amount, description, method, url }) {
   if (tg) { tg.ready(); tg.expand(); }
   document.getElementById('go').addEventListener('click', () => {
     const url = ${JSON.stringify(url)};
-    window.location.href = url;
+    // Abre en el navegador del sistema (no en el WebView embebido de Telegram), necesario para que
+    // funcionen Apple Pay / Google Pay / Link durante el checkout.
+    if (tg && tg.openLink) tg.openLink(url);
+    else window.location.href = url;
   });
 </script>
 </body>
@@ -469,7 +496,7 @@ async function createPaddleCheckout(amount, description) {
 
 async function createStripeCheckout(amount, description) {
     const session = await stripe.checkout.sessions.create({
-        payment_method_types: ['card'],
+        automatic_payment_methods: { enabled: true }, // deja que Stripe muestre Apple Pay / Google Pay / Link segun lo habilitado en el dashboard
         line_items: [{
             price_data: {
                 currency: 'usd',
@@ -1009,6 +1036,11 @@ bot.on('message', async (msg) => {
                 .then(() => bot.sendMessage(opId, '💳 Comprobante recibido (arriba 👆). Ábrelo en Pedidos para confirmar y entregar la cuenta.', {
                     reply_markup: { inline_keyboard: [[{ text: '🧾 Abrir Pedidos', web_app: { url: `${APP_BASE_URL}/dashboard` } }]] }
                 }))
+                .then(sent => {
+                    const list = pendingActionMessages.get(chatId) || [];
+                    list.push({ opId, messageId: sent.message_id });
+                    pendingActionMessages.set(chatId, list);
+                })
                 .catch(() => {});
         }
         return;
@@ -1918,6 +1950,7 @@ app.post('/support/api/thread/:id/deliver', requireOperatorAuth, async (req, res
     persistTransfersState();
     if (pending.txId) attachDeliveryToSale(pending.txId, text);
     notifyAllOperators(`✅ Cuenta entregada (mini app) — ${pending.description}`, {}, [req.operator.id]);
+    resolveActionMessages(customerId, `✅ Ya entregada — ${pending.description}`);
 
     res.json({ ok: true });
 });
@@ -1947,6 +1980,7 @@ app.delete('/support/api/order/:id', requireOperatorAuth, (req, res) => {
         if (d.customerChatId === customerId) awaitingDelivery.delete(opId);
     }
     persistTransfersState();
+    resolveActionMessages(customerId, '❌ Pedido eliminado.');
     res.json({ ok: true });
 });
 
@@ -2002,6 +2036,7 @@ app.post('/support/api/thread/:id/confirm-and-deliver', requireOperatorAuth, asy
     const methodLabel = PAYMENT_METHODS[transfer.method]?.label || '🏧 Transferencia MXN';
     recordSale({ date: new Date().toISOString(), method: transfer.method || 'transferencia', amount: parseFloat(transfer.amount), currency: 'USD', description: transfer.description, txId: transferId, account: text, customerChatId: customerId });
     notifyAllOperators(`✅ ${methodLabel} confirmada y entregada (vía mini app) — $${parseFloat(transfer.amount).toFixed(2)} USD — ${transfer.description}`, {}, [req.operator.id]);
+    resolveActionMessages(customerId, `✅ Ya entregada — ${transfer.description}`);
 
     res.json({ ok: true });
 });
