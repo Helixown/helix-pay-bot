@@ -158,15 +158,23 @@ function notifyAllOperators(text, options = {}, exclude = []) {
     }
 }
 
-// Tras confirmarse un pago (Stripe/Paddle), pide la cuenta a entregar igual que en transferencia MXN
+// Tras confirmarse un pago (Stripe/Paddle), pide la cuenta a entregar a TODOS los operadores (cualquiera puede entregar)
 function triggerDelivery(txId, description) {
     const meta = checkoutMeta.get(txId);
     if (!meta || !meta.customerChatId) return;
-    const { customerChatId, askChatId } = meta;
-    awaitingDelivery.set(askChatId, { customerChatId, description });
+    const { customerChatId } = meta;
+    for (const opId of operadores) {
+        awaitingDelivery.set(opId, { customerChatId, description });
+    }
     persistTransfersState();
-    setTimeout(() => { awaitingDelivery.delete(askChatId); persistTransfersState(); }, 30 * 60 * 1000);
-    bot.sendMessage(askChatId, '✏️ Pago confirmado — escribe la cuenta a entregar (formato correo:contraseña).').catch(() => {});
+    setTimeout(() => {
+        for (const opId of operadores) {
+            const cur = awaitingDelivery.get(opId);
+            if (cur && cur.customerChatId === customerChatId) awaitingDelivery.delete(opId);
+        }
+        persistTransfersState();
+    }, 30 * 60 * 1000);
+    notifyAllOperators('✏️ Pago confirmado — escribe la cuenta a entregar (formato correo:contraseña).', {}, []);
 }
 
 // ── Pending payments (in-memory) ─────────────────────────────────────────────
@@ -1160,6 +1168,15 @@ bot.on('message', async (msg) => {
     const delivery = awaitingDelivery.get(chatId);
     if (delivery && !(msg.text && msg.text.startsWith('/'))) {
         awaitingDelivery.delete(chatId);
+        // Limpia el aviso en los demás operadores para que no intenten entregar la misma cuenta dos veces
+        for (const opId of operadores) {
+            if (opId === chatId) continue;
+            const other = awaitingDelivery.get(opId);
+            if (other && other.customerChatId === delivery.customerChatId) {
+                awaitingDelivery.delete(opId);
+                bot.sendMessage(opId, 'ℹ️ Esta cuenta ya fue entregada por otro operador.').catch(() => {});
+            }
+        }
         persistTransfersState();
         const formatted = msg.text ? formatDelivery(msg.text, delivery.description) : null;
         const sendToCustomer = formatted
