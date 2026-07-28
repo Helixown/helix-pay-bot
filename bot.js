@@ -1747,6 +1747,7 @@ function renderDashboardApp() {
   let chatOrigin = 'clients';
   let chatPoll = null;
   let listPoll = null;
+  let deliverBoxSig = null;
 
   function esc(s) { return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
 
@@ -1992,15 +1993,18 @@ function renderDashboardApp() {
     chatOrigin = origin === 'orders' ? 'orders' : 'clients';
     currentView = 'chat';
     chatCustomerId = id;
+    deliverBoxSig = null;
     setHeader('💬 …', true);
     app.innerHTML = \`
       <div id="deliverBox"></div>
-      <div id="messages"></div>
-      <div id="composer">
-        <input id="chatInput" placeholder="Escribe tu respuesta…" />
-        <button id="chatSend">Enviar</button>
-      </div>
-      <button id="resolveBtn" class="secondary-btn">✅ Marcar resuelto</button>\`;
+      <div id="chatSection" style="display:none">
+        <div id="messages"></div>
+        <div id="composer">
+          <input id="chatInput" placeholder="Escribe tu respuesta…" />
+          <button id="chatSend">Enviar</button>
+        </div>
+        <button id="resolveBtn" class="secondary-btn">✅ Marcar resuelto</button>
+      </div>\`;
     document.getElementById('chatSend').addEventListener('click', sendChat);
     document.getElementById('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
     document.getElementById('resolveBtn').addEventListener('click', async () => {
@@ -2015,25 +2019,32 @@ function renderDashboardApp() {
     try {
       const t = await api('/support/api/thread/' + chatCustomerId);
       titleEl.textContent = '👤 ' + t.name;
+      document.getElementById('chatSection').style.display = t.isChatThread ? '' : 'none';
       const box = document.getElementById('deliverBox');
-      if (t.pendingConfirm) {
-        box.innerHTML = \`
-          <div class="deliver-form">
-            💳 Comprobante recibido — \${esc(t.confirmDescription || '')} \${t.confirmAmount ? '($' + t.confirmAmount + ')' : ''}
-            <input id="deliverText" placeholder="correo:contraseña" />
-            <button id="deliverBtn">📦 Entregar cuenta</button>
-          </div>\`;
-        document.getElementById('deliverBtn').onclick = () => confirmAndDeliver();
-      } else if (t.pendingDelivery) {
-        box.innerHTML = \`
-          <div class="deliver-form">
-            📦 Esperando entrega: \${esc(t.deliveryDescription)}
-            <input id="deliverText" placeholder="correo:contraseña" />
-            <button id="deliverBtn">📦 Entregar cuenta</button>
-          </div>\`;
-        document.getElementById('deliverBtn').onclick = deliverAccount;
-      } else {
-        box.innerHTML = '';
+      const sig = t.pendingConfirm ? ('confirm:' + t.confirmDescription + ':' + t.confirmAmount)
+        : t.pendingDelivery ? ('deliver:' + t.deliveryDescription)
+        : 'none';
+      if (sig !== deliverBoxSig) {
+        deliverBoxSig = sig;
+        if (t.pendingConfirm) {
+          box.innerHTML = \`
+            <div class="deliver-form">
+              💳 Comprobante recibido — \${esc(t.confirmDescription || '')} \${t.confirmAmount ? '($' + t.confirmAmount + ')' : ''}
+              <input id="deliverText" placeholder="correo:contraseña" />
+              <button id="deliverBtn">📦 Entregar cuenta</button>
+            </div>\`;
+          document.getElementById('deliverBtn').onclick = () => confirmAndDeliver();
+        } else if (t.pendingDelivery) {
+          box.innerHTML = \`
+            <div class="deliver-form">
+              📦 Esperando entrega: \${esc(t.deliveryDescription)}
+              <input id="deliverText" placeholder="correo:contraseña" />
+              <button id="deliverBtn">📦 Entregar cuenta</button>
+            </div>\`;
+          document.getElementById('deliverBtn').onclick = deliverAccount;
+        } else {
+          box.innerHTML = '';
+        }
       }
       renderChatMessages(t.messages || [], 'operator');
     } catch {}
@@ -2282,6 +2293,7 @@ app.get('/support/api/thread/:id', requireOperatorAuth, (req, res) => {
         id: req.params.id,
         name: t?.name || `Cliente ${req.params.id}`,
         messages: t?.messages || [],
+        isChatThread: !!t,
         pendingDelivery: !!pendingDeliv,
         deliveryDescription: pendingDeliv?.description || null,
         pendingConfirm: !!pendingConf,
