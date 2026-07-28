@@ -556,11 +556,33 @@ bot.onText(/\/listproductos/, (msg) => {
     bot.sendMessage(msg.chat.id, `📦 <b>Catálogo</b>\n${lista}`, { parse_mode: 'HTML' });
 });
 
+function customerWelcomePanel() {
+    return {
+        text:
+`👋 <b>¡Bienvenido a JH STORE!</b>
+━━━━━━━━━━━━━━
+Productos y servicios digitales, con pago 100% seguro (Stripe / PayPal).
+
+Toca el botón de abajo para ver el catálogo.`,
+        keyboard: [
+            [{ text: '🛒 Ver catálogo', callback_data: 'open_tienda' }],
+            [{ text: '💬 Contactar soporte', callback_data: 'open_support' }]
+        ]
+    };
+}
+
 function tiendaPanel() {
-    if (!storeOpen) return { text: '🔴 <b>JH STORE</b>\n━━━━━━━━━━━━━━\nEn este momento no estamos recibiendo pedidos. Vuelve más tarde 🙏', keyboard: [] };
+    if (!storeOpen) return {
+        text: '🔴 <b>JH STORE</b>\n━━━━━━━━━━━━━━\nEn este momento no estamos recibiendo pedidos. Vuelve más tarde 🙏',
+        keyboard: [
+            [{ text: '💬 Contactar soporte', callback_data: 'open_support' }],
+            [{ text: '⬅️ Menú', callback_data: 'customer_home' }]
+        ]
+    };
     const ids = Object.keys(catalog.items);
-    if (!ids.length) return { text: '🛒 No hay productos disponibles por el momento.', keyboard: [] };
+    if (!ids.length) return { text: '🛒 No hay productos disponibles por el momento.', keyboard: [[{ text: '⬅️ Menú', callback_data: 'customer_home' }]] };
     const buttons = ids.map(id => ([{ text: `${catalog.items[id].name} — $${catalog.items[id].price.toFixed(2)}`, callback_data: `buy_${id}` }]));
+    buttons.push([{ text: '⬅️ Menú', callback_data: 'customer_home' }]);
     return { text: '🛒 <b>JH STORE</b>\nElige un producto:', keyboard: buttons };
 }
 
@@ -579,10 +601,13 @@ bot.onText(/\/tienda/, (msg) => {
     sendTienda(msg.chat.id);
 });
 
-function openSupport(chatId) {
+function openSupport(chatId, messageId) {
     openSupportChats.add(chatId);
     setTimeout(() => openSupportChats.delete(chatId), 24 * 60 * 60 * 1000);
-    bot.sendMessage(chatId, '💬 Escribe tu mensaje y te contestamos por aquí lo antes posible.');
+    const text = '💬 Escribe tu mensaje y te contestamos por aquí lo antes posible.';
+    const options = { reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'customer_home' }]] } };
+    if (messageId) return editOrSend(chatId, messageId, text, options);
+    return bot.sendMessage(chatId, text, options);
 }
 
 bot.onText(/\/soporte/, (msg) => {
@@ -871,6 +896,11 @@ function withBack(keyboard) {
     return [...keyboard, [{ text: '⬅️ Menú', callback_data: 'panel_home' }]];
 }
 
+// Botón de regreso correcto según quién esté viendo el mensaje (operador -> panel; cliente -> bienvenida)
+function menuButtonRow(chatId) {
+    return [{ text: '⬅️ Menú', callback_data: isAllowed(chatId) ? 'panel_home' : 'customer_home' }];
+}
+
 function editPanel(chatId, messageId, panel) {
     const keyboard = withBack(panel.keyboard);
     return editOrSend(chatId, messageId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
@@ -894,17 +924,8 @@ bot.onText(/\/start(?:\s+(\S+))?/, (msg, match) => {
         }
 
         if (payload === 'tienda') return sendTienda(chatId);
-        return bot.sendMessage(chatId,
-`👋 <b>¡Bienvenido a JH STORE!</b>
-━━━━━━━━━━━━━━
-Productos y servicios digitales, con pago 100% seguro (Stripe / PayPal).
-
-Toca el botón de abajo para ver el catálogo.`,
-            { parse_mode: 'HTML', reply_markup: { inline_keyboard: [
-                [{ text: '🛒 Ver catálogo', callback_data: 'open_tienda' }],
-                [{ text: '💬 Contactar soporte', callback_data: 'open_support' }]
-            ] } }
-        );
+        const panel = customerWelcomePanel();
+        return bot.sendMessage(chatId, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
     }
 
     const isAdmin = msg.chat.id === ADMIN_CHAT_ID;
@@ -949,8 +970,15 @@ bot.on('callback_query', async (cq) => {
 
     if (data === 'open_support') {
         bot.answerCallbackQuery(cq.id);
-        openSupport(chatId);
+        openSupport(chatId, cq.message.message_id);
         return;
+    }
+
+    if (data === 'customer_home') {
+        bot.answerCallbackQuery(cq.id);
+        openSupportChats.delete(chatId);
+        const panel = customerWelcomePanel();
+        return editOrSend(chatId, cq.message.message_id, panel.text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: panel.keyboard } });
     }
 
     if (data === 'back_tienda') {
@@ -1165,7 +1193,7 @@ bot.on('callback_query', async (cq) => {
 
         if (!pending) {
             bot.answerCallbackQuery(cq.id, { text: '❌ Solicitud expirada.' });
-            return editOrSend(chatId, cq.message.message_id, '❌ Solicitud expirada.', {});
+            return editOrSend(chatId, cq.message.message_id, '❌ Solicitud expirada.', { reply_markup: { inline_keyboard: [menuButtonRow(chatId)] } });
         }
 
         const { amount, description, targetChatId, operatorChatId } = pending;
@@ -1209,10 +1237,10 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
 
         if (!customerChatId || chatId === customerChatId) {
             // no hay un chat de cliente distinto vinculado (o el que clickeó es el cliente): mostrar los datos aquí mismo
-            await editOrSend(chatId, cq.message.message_id, payMsg, { parse_mode: 'HTML' });
+            await editOrSend(chatId, cq.message.message_id, payMsg, { parse_mode: 'HTML', reply_markup: { inline_keyboard: [menuButtonRow(chatId)] } });
         } else {
-            await editOrSend(chatId, cq.message.message_id, '✅ Datos enviados al cliente. Te aviso cuando mande el comprobante.', {});
-            await bot.sendMessage(customerChatId, payMsg, { parse_mode: 'HTML' }).catch(() => {});
+            await editOrSend(chatId, cq.message.message_id, '✅ Datos enviados al cliente. Te aviso cuando mande el comprobante.', { reply_markup: { inline_keyboard: [menuButtonRow(chatId)] } });
+            await bot.sendMessage(customerChatId, payMsg, { parse_mode: 'HTML', reply_markup: { inline_keyboard: [menuButtonRow(customerChatId)] } }).catch(() => {});
         }
 
         notifyAllOperators(
@@ -1263,7 +1291,7 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
 
         if (!pending) {
             bot.answerCallbackQuery(cq.id, { text: '❌ Solicitud expirada.' });
-            return editOrSend(chatId, cq.message.message_id, '❌ Solicitud expirada.', {});
+            return editOrSend(chatId, cq.message.message_id, '❌ Solicitud expirada.', { reply_markup: { inline_keyboard: [menuButtonRow(chatId)] } });
         }
 
         bot.answerCallbackQuery(cq.id);
@@ -1282,7 +1310,7 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
 
         if (!pending) {
             bot.answerCallbackQuery(cq.id, { text: '❌ Solicitud expirada. Usa /cobrar de nuevo.' });
-            return editOrSend(chatId, cq.message.message_id, '❌ Solicitud expirada. Usa /cobrar de nuevo.', {});
+            return editOrSend(chatId, cq.message.message_id, '❌ Solicitud expirada. Usa /cobrar de nuevo.', { reply_markup: { inline_keyboard: [menuButtonRow(chatId)] } });
         }
 
         bot.answerCallbackQuery(cq.id, { text: '⏳ Generando link...' });
@@ -1326,7 +1354,7 @@ Envía la foto de tu comprobante aquí una vez hecho el pago.`;
             }
         } catch (err) {
             const detail = err.response?.data?.error?.detail || err.message;
-            await editOrSend(replyChatId, cq.message.message_id, `❌ Error: ${detail}`, {});
+            await editOrSend(replyChatId, cq.message.message_id, `❌ Error: ${detail}`, { reply_markup: { inline_keyboard: [menuButtonRow(replyChatId)] } });
         }
     }
 });
