@@ -2183,29 +2183,13 @@ function renderDashboardApp() {
         <div class="deliver-form">
           \${esc(data.label)} — \${esc(data.amountLine)}
           <pre style="white-space:pre-wrap;word-break:break-word;background:var(--tg-theme-bg-color,#fff);padding:8px;border-radius:8px;margin:8px 0">\${esc(data.text)}</pre>
-          Sube tu comprobante (foto o PDF) cuando hayas pagado:
-          <input id="proofFile" type="file" accept="image/*,.pdf" />
-          <button id="proofSend">📎 Enviar comprobante</button>
-          <div id="proofStatus" class="sub"></div>
+          Cuando hayas pagado, cierra esto y envía la foto de tu comprobante aquí mismo en el chat de Telegram (como cualquier foto normal).
+          <button id="closeToChat">💬 Ir al chat a enviar el comprobante</button>
         </div>\`;
-      document.getElementById('proofSend').addEventListener('click', sendProof);
+      document.getElementById('closeToChat').addEventListener('click', () => {
+        if (window.Telegram?.WebApp?.close) Telegram.WebApp.close();
+      });
     } catch (err) { alert(err.message); }
-  }
-  function sendProof() {
-    const input = document.getElementById('proofFile');
-    const file = input.files[0];
-    if (!file) return alert('Elige un archivo primero.');
-    const status = document.getElementById('proofStatus');
-    status.textContent = 'Subiendo…';
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const fileBase64 = reader.result.split(',')[1];
-      try {
-        await api('/api/store/proof', { method: 'POST', body: JSON.stringify({ fileBase64, mimeType: file.type, fileName: file.name }) });
-        status.textContent = '✅ Comprobante enviado. Espera la confirmación.';
-      } catch (err) { status.textContent = '❌ ' + err.message; }
-    };
-    reader.readAsDataURL(file);
   }
 
   // ---- CLIENTE (su propio chat) ----
@@ -2485,32 +2469,8 @@ app.post('/api/store/pay/:pendingId/:method', requireAnyAuth, async (req, res) =
         const mxnRate = await getMxnRate();
         amountLine += ` ≈ $${(amount * mxnRate).toFixed(2)} MXN`;
     }
-    notifyAllOperators(`${methodCfg.label} solicitado (vía mini app) — $${amount.toFixed(2)} USD — ${description}.\nEsperando comprobante.`, {}, []);
 
     res.json({ type: 'manual', label: methodCfg.label, amountLine, text: methodText, description });
-});
-
-// Comprobante subido desde la mini app (foto/PDF en base64) -> se reenvía a los operadores igual que si lo mandaran por chat
-app.post('/api/store/proof', requireAnyAuth, async (req, res) => {
-    const { fileBase64, mimeType, fileName } = req.body || {};
-    if (!fileBase64) return res.status(400).json({ error: 'Archivo vacío.' });
-    const awaitingProof = transferByCustomer.get(req.user.id);
-    if (!awaitingProof) return res.status(404).json({ error: 'No hay un pago pendiente de comprobante.' });
-
-    const buffer = Buffer.from(fileBase64, 'base64');
-    const isImage = String(mimeType || '').startsWith('image/');
-    const who = req.user.username ? '@' + req.user.username : (req.user.first_name || 'Cliente');
-    const fileOpts = { filename: fileName || 'comprobante', contentType: mimeType || 'application/octet-stream' };
-
-    for (const opId of operadores) {
-        const send = isImage
-            ? bot.sendPhoto(opId, buffer, { caption: `📎 Comprobante de ${who} (vía mini app)` }, fileOpts)
-            : bot.sendDocument(opId, buffer, { caption: `📎 Comprobante de ${who} (vía mini app)` }, fileOpts);
-        send.then(() => bot.sendMessage(opId, 'Confírmalo desde el dashboard, o con el botón:', {
-            reply_markup: { inline_keyboard: [[{ text: '✅ Confirmar pago recibido', callback_data: `confirm_transfer_${awaitingProof.transferId}` }]] }
-        })).catch(() => {});
-    }
-    res.json({ ok: true });
 });
 
 // Confirmar un pago pendiente de un cliente, desde el dashboard (equivalente al botón "Confirmar pago recibido")
