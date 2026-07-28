@@ -1121,10 +1121,14 @@ bot.on('callback_query', async (cq) => {
         const custId = data.replace('soporte_cerrar_', '');
         supportThreads.delete(custId);
         persistSupportThreads();
+        openSupportChats.delete(parseInt(custId, 10));
         for (const [opId, cId] of awaitingSupportReplyTo) {
             if (String(cId) === custId) awaitingSupportReplyTo.delete(opId);
         }
         bot.answerCallbackQuery(cq.id, { text: '✅ Marcado como resuelto.' });
+        bot.sendMessage(parseInt(custId, 10), 'Tu conversación con soporte se marcó como resuelta. Si necesitas algo más, toca "💬 Contactar soporte" de nuevo.', {
+            reply_markup: { inline_keyboard: [[{ text: '⬅️ Menú', callback_data: 'customer_home' }]] }
+        }).catch(() => {});
         return editPanel(chatId, cq.message.message_id, soportePanel());
     }
 
@@ -1471,6 +1475,13 @@ bot.on('message', async (msg) => {
         });
         persistSupportThreads();
         for (const opId of operadores) {
+            const alreadyOpen = awaitingSupportReplyTo.get(opId) === chatId;
+            if (alreadyOpen) {
+                // Ya tiene este chat abierto: solo fluye el mensaje, sin repetir la tarjeta
+                setSupportReplyTo(opId, chatId); // renueva el tiempo de espera
+                bot.copyMessage(opId, chatId, msg.message_id).catch(() => {});
+                continue;
+            }
             bot.copyMessage(opId, chatId, msg.message_id)
                 .then((sent) => {
                     supportMessages.set(`${opId}:${sent.message_id}`, chatId);
