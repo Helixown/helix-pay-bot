@@ -258,7 +258,7 @@ function savePending(amount, description, targetChatId, operatorChatId) {
 
 function metodoPagoPanel(pendingId, amount, description, showCatalogoBack) {
     const row1 = [];
-    if (stripe) row1.push({ text: '💳 Tarjeta (Stripe)', callback_data: `pay_s_${pendingId}` });
+    if (stripe) row1.push({ text: '💳 Tarjeta / Apple Pay / Google Pay / Link', callback_data: `pay_s_${pendingId}` });
     row1.push({ text: '🏦 PayPal (Paddle)', callback_data: `pay_p_${pendingId}` });
     const keyboard = [
         row1,
@@ -2049,7 +2049,7 @@ app.post('/api/charge', requireOperatorAuth, (req, res) => {
     if (!amount || amount <= 0) return res.status(400).json({ error: 'Monto inválido.' });
     const pendingId = savePending(amount, description, targetChatId, req.operator.id);
     const methods = [];
-    if (stripe) methods.push({ key: 'stripe', label: '💳 Tarjeta (Stripe)' });
+    if (stripe) methods.push({ key: 'stripe', label: '💳 Tarjeta / Apple Pay / Google Pay / Link' });
     methods.push({ key: 'paddle', label: '🏦 PayPal (Paddle)' });
     for (const [key, cfg] of Object.entries(PAYMENT_METHODS)) methods.push({ key, label: cfg.label });
     res.json({ pendingId, amount, description, methods });
