@@ -227,6 +227,14 @@ function persistTransfersState() {
     }));
 }
 
+const DELIVERY_RECOMMENDATIONS =
+`⚠️ <b>Recomendaciones</b>
+━━━━━━━━━━━━━━
+🚫 No usar el navegador <b>Aloha</b>
+🔒 No cambiar la información de la cuenta
+🌎 VPN recomendada: <b>Canadá 🇨🇦 · Japón 🇯🇵 · México 🇲🇽 · Colombia 🇨🇴</b>
+🌐 Navegadores recomendados: <b>Chrome · DuckDuckGo · Firefox</b>`;
+
 // Si el texto es "correo:contraseña", arma el mensaje de entrega con el formato pedido (correo / contraseña / número de la descripción, ej. "Cuenta de 200" -> 200)
 function formatDelivery(text, description) {
     const sep = text.indexOf(':');
@@ -236,7 +244,7 @@ function formatDelivery(text, description) {
     const esc = (s) => s.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
     const match = String(description).match(/\d+(\.\d+)?/);
     const value = match ? `💰 $${match[0]}` : description;
-    return `🎉 <b>¡Gracias por tu compra!</b>\n\n📧 Email: <code>${esc(email)}</code>\n\n🔑 Pass: <code>${esc(password)}</code>\n\n${value}`;
+    return `🎉 <b>¡Gracias por tu compra!</b>\n\n📧 Email: <code>${esc(email)}</code>\n\n🔑 Pass: <code>${esc(password)}</code>\n\n${value}\n\n${DELIVERY_RECOMMENDATIONS}`;
 }
 
 // ── Payment landing pages (mini app) ─────────────────────────────────────────
