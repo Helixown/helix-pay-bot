@@ -1564,7 +1564,7 @@ function renderDashboardApp() {
       <div id="chatSection" style="display:none">
         <div id="messages"></div>
         <div id="composer">
-          <textarea id="chatInput" rows="1" placeholder="Escribe tu respuesta… (*así* = monoespaciado, Shift+Enter = salto de línea)"></textarea>
+          <textarea id="chatInput" rows="1" placeholder="Escribe tu respuesta…"></textarea>
           <button id="chatSend">Enviar</button>
         </div>
         <button id="resolveBtn" class="secondary-btn">✅ Marcar resuelto</button>
@@ -1914,6 +1914,7 @@ app.get('/support/api/threads', requireOperatorAuth, (_req, res) => {
 
 app.get('/support/api/thread/:id', requireOperatorAuth, (req, res) => {
     const t = supportThreads.get(req.params.id);
+    console.log(`[debug thread/:id] id=${req.params.id} found=${!!t} messagesLen=${t?.messages?.length} lastMessage=${JSON.stringify(t?.lastMessage)}`);
     const pendingDeliv = [...awaitingDelivery.values()].find(d => String(d.customerChatId) === req.params.id);
     const pendingConf  = [...pendingTransfers.values()].find(tr => String(tr.customerChatId) === req.params.id && tr.proofReceived);
     if (!t && !pendingDeliv && !pendingConf) return res.status(404).json({ error: 'No encontrado' });
