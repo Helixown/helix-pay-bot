@@ -1564,7 +1564,7 @@ function renderDashboardApp() {
       <div id="chatSection" style="display:none">
         <div id="messages"></div>
         <div id="composer">
-          <textarea id="chatInput" rows="1" placeholder="Escribe tu respuesta… (Ctrl+Enter para salto de línea)"></textarea>
+          <textarea id="chatInput" rows="1" placeholder="Escribe tu respuesta… (Shift+Enter para salto de línea)"></textarea>
           <button id="chatSend">Enviar</button>
         </div>
         <button id="resolveBtn" class="secondary-btn">✅ Marcar resuelto</button>
@@ -1644,7 +1644,7 @@ function renderDashboardApp() {
   function wireComposerKeys(id, sendFn) {
     const el = document.getElementById(id);
     el.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.ctrlKey) { e.preventDefault(); sendFn(); }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendFn(); }
     });
     el.addEventListener('input', () => {
       el.style.height = 'auto';
