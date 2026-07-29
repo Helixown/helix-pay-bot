@@ -1633,8 +1633,12 @@ function renderDashboardApp() {
   function renderChatMessages(msgs, mine) {
     const el = document.getElementById('messages');
     if (!el) return;
-    el.innerHTML = msgs.map(m => \`<div class="bubble \${m.from === mine ? 'me' : 'them'}">\${formatMsgText(m.text)}<span class="t">\${new Date(m.at).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}</span></div>\`).join('');
-    app.scrollTop = app.scrollHeight;
+    try {
+      el.innerHTML = msgs.map(m => \`<div class="bubble \${m.from === mine ? 'me' : 'them'}">\${formatMsgText(m.text)}<span class="t">\${new Date(m.at).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}</span></div>\`).join('');
+      app.scrollTop = app.scrollHeight;
+    } catch (err) {
+      el.innerHTML = '<div class="err">DEBUG render error: ' + esc(err.message) + '</div>';
+    }
   }
   // Escapa el texto y convierte *asi* en monoespaciado
   function formatMsgText(text) {
