@@ -1278,9 +1278,10 @@ function renderDashboardApp() {
   .bubble.them { background: var(--tg-theme-secondary-bg-color, #f2f2f7); border-bottom-left-radius: 4px; }
   .bubble.me { margin-left: auto; background: var(--tg-theme-button-color, #2ea6ff); color: var(--tg-theme-button-text-color, #ffffff); border-bottom-right-radius: 4px; }
   .bubble .t { display: block; font-size: 10px; opacity: .6; margin-top: 3px; }
-  #composer { display: flex; gap: 8px; margin-top: 6px; }
-  #composer input { flex: 1; border: 1px solid rgba(127,127,127,.3); border-radius: 20px; padding: 10px 14px; font-size: 14px; background: var(--tg-theme-bg-color, #fff); color: inherit; }
-  #composer button { border: none; background: var(--tg-theme-button-color, #2ea6ff); color: var(--tg-theme-button-text-color, #fff); border-radius: 20px; padding: 0 18px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  #composer { display: flex; gap: 8px; margin-top: 6px; align-items: flex-end; }
+  #composer textarea { flex: 1; resize: none; max-height: 120px; border: 1px solid rgba(127,127,127,.3); border-radius: 18px; padding: 10px 14px; font-size: 14px; font-family: inherit; background: var(--tg-theme-bg-color, #fff); color: inherit; }
+  #composer button { border: none; background: var(--tg-theme-button-color, #2ea6ff); color: var(--tg-theme-button-text-color, #fff); border-radius: 20px; padding: 10px 18px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  .bubble code { background: rgba(127,127,127,.2); border-radius: 4px; padding: 1px 5px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
   .deliver-form { padding: 10px; border-radius: 12px; background: rgba(255,176,32,.15); margin-bottom: 10px; font-size: 13px; }
   .deliver-form input { width: 100%; margin: 8px 0; border: 1px solid rgba(127,127,127,.3); border-radius: 10px; padding: 9px; background: var(--tg-theme-bg-color, #fff); color: inherit; }
   .deliver-form button { width: 100%; border: none; background: #ffb020; color: #000; border-radius: 10px; padding: 9px; font-weight: 600; cursor: pointer; }
@@ -1563,13 +1564,13 @@ function renderDashboardApp() {
       <div id="chatSection" style="display:none">
         <div id="messages"></div>
         <div id="composer">
-          <input id="chatInput" placeholder="Escribe tu respuesta…" />
+          <textarea id="chatInput" rows="1" placeholder="Escribe tu respuesta… (Ctrl+Enter para salto de línea)"></textarea>
           <button id="chatSend">Enviar</button>
         </div>
         <button id="resolveBtn" class="secondary-btn">✅ Marcar resuelto</button>
       </div>\`;
     document.getElementById('chatSend').addEventListener('click', sendChat);
-    document.getElementById('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
+    wireComposerKeys('chatInput', sendChat);
     document.getElementById('resolveBtn').addEventListener('click', async () => {
       try { await api('/support/api/thread/' + chatCustomerId + '/resolve', { method: 'POST' }); (chatOrigin === 'orders' ? renderOrders : renderClients)(); }
       catch (err) { alert(err.message); }
@@ -1632,14 +1633,30 @@ function renderDashboardApp() {
   function renderChatMessages(msgs, mine) {
     const el = document.getElementById('messages');
     if (!el) return;
-    el.innerHTML = msgs.map(m => \`<div class="bubble \${m.from === mine ? 'me' : 'them'}">\${esc(m.text)}<span class="t">\${new Date(m.at).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}</span></div>\`).join('');
+    el.innerHTML = msgs.map(m => \`<div class="bubble \${m.from === mine ? 'me' : 'them'}">\${formatMsgText(m.text)}<span class="t">\${new Date(m.at).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}</span></div>\`).join('');
     app.scrollTop = app.scrollHeight;
+  }
+  // Escapa el texto y convierte \`asi\` en monoespaciado (como el formato de codigo de Telegram)
+  function formatMsgText(text) {
+    return esc(text).replace(/\`([^\`]+)\`/g, '<code>$1</code>');
+  }
+  // Enter envia, Ctrl+Enter mete un salto de linea; tambien autoajusta la altura del textarea
+  function wireComposerKeys(id, sendFn) {
+    const el = document.getElementById(id);
+    el.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.ctrlKey) { e.preventDefault(); sendFn(); }
+    });
+    el.addEventListener('input', () => {
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+    });
   }
   async function sendChat() {
     const input = document.getElementById('chatInput');
     const text = input.value.trim();
     if (!text || !chatCustomerId) return;
     input.value = '';
+    input.style.height = 'auto';
     try { await api('/support/api/thread/' + chatCustomerId + '/reply', { method: 'POST', body: JSON.stringify({ text }) }); refreshClientChat(); }
     catch (err) { alert(err.message); }
   }
@@ -1779,11 +1796,11 @@ function renderDashboardApp() {
     app.innerHTML = \`
       <div id="messages"></div>
       <div id="composer">
-        <input id="custInput" placeholder="Escribe tu mensaje…" />
+        <textarea id="custInput" rows="1" placeholder="Escribe tu mensaje…"></textarea>
         <button id="custSend">Enviar</button>
       </div>\`;
     document.getElementById('custSend').addEventListener('click', sendCustomerMsg);
-    document.getElementById('custInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendCustomerMsg(); });
+    wireComposerKeys('custInput', sendCustomerMsg);
     await refreshCustomerChat();
     chatPoll = setInterval(refreshCustomerChat, 3000);
   }
@@ -1795,6 +1812,7 @@ function renderDashboardApp() {
     const text = input.value.trim();
     if (!text) return;
     input.value = '';
+    input.style.height = 'auto';
     try { await api('/support/api/my-thread/send', { method: 'POST', body: JSON.stringify({ text }) }); refreshCustomerChat(); }
     catch (err) { alert(err.message); }
   }
