@@ -1564,7 +1564,7 @@ function renderDashboardApp() {
       <div id="chatSection" style="display:none">
         <div id="messages"></div>
         <div id="composer">
-          <textarea id="chatInput" rows="1" placeholder="Escribe tu respuesta… (Shift+Enter para salto de línea)"></textarea>
+          <textarea id="chatInput" rows="1" placeholder="Escribe tu respuesta… (*así* = monoespaciado, Shift+Enter = salto de línea)"></textarea>
           <button id="chatSend">Enviar</button>
         </div>
         <button id="resolveBtn" class="secondary-btn">✅ Marcar resuelto</button>
@@ -1636,9 +1636,9 @@ function renderDashboardApp() {
     el.innerHTML = msgs.map(m => \`<div class="bubble \${m.from === mine ? 'me' : 'them'}">\${formatMsgText(m.text)}<span class="t">\${new Date(m.at).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}</span></div>\`).join('');
     app.scrollTop = app.scrollHeight;
   }
-  // Escapa el texto y convierte \`asi\` en monoespaciado (como el formato de codigo de Telegram)
+  // Escapa el texto y convierte *asi* en monoespaciado
   function formatMsgText(text) {
-    return esc(text).replace(/\`([^\`]+)\`/g, '<code>$1</code>');
+    return esc(text).replace(/\*([^*]+)\*/g, '<code>$1</code>');
   }
   // Enter envia, Ctrl+Enter mete un salto de linea; tambien autoajusta la altura del textarea
   function wireComposerKeys(id, sendFn) {
