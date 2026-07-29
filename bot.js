@@ -1633,16 +1633,12 @@ function renderDashboardApp() {
   function renderChatMessages(msgs, mine) {
     const el = document.getElementById('messages');
     if (!el) return;
-    try {
-      el.innerHTML = msgs.map(m => \`<div class="bubble \${m.from === mine ? 'me' : 'them'}">\${formatMsgText(m.text)}<span class="t">\${new Date(m.at).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}</span></div>\`).join('');
-      app.scrollTop = app.scrollHeight;
-    } catch (err) {
-      el.innerHTML = '<div class="err" style="white-space:pre-wrap;font-size:11px">DEBUG: ' + esc(err.message) + '\\n\\n' + esc(err.stack || '') + '</div>';
-    }
+    el.innerHTML = msgs.map(m => \`<div class="bubble \${m.from === mine ? 'me' : 'them'}">\${formatMsgText(m.text)}<span class="t">\${new Date(m.at).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}</span></div>\`).join('');
+    app.scrollTop = app.scrollHeight;
   }
   // Escapa el texto y convierte *asi* en monoespaciado
   function formatMsgText(text) {
-    return esc(text).replace(/\*([^*]+)\*/g, '<code>$1</code>');
+    return esc(text).replace(/\\*([^*]+)\\*/g, '<code>$1</code>');
   }
   // Enter envia, Ctrl+Enter mete un salto de linea; tambien autoajusta la altura del textarea
   function wireComposerKeys(id, sendFn) {
@@ -1918,7 +1914,6 @@ app.get('/support/api/threads', requireOperatorAuth, (_req, res) => {
 
 app.get('/support/api/thread/:id', requireOperatorAuth, (req, res) => {
     const t = supportThreads.get(req.params.id);
-    console.log(`[debug thread/:id] id=${req.params.id} found=${!!t} messagesLen=${t?.messages?.length} lastMessage=${JSON.stringify(t?.lastMessage)}`);
     const pendingDeliv = [...awaitingDelivery.values()].find(d => String(d.customerChatId) === req.params.id);
     const pendingConf  = [...pendingTransfers.values()].find(tr => String(tr.customerChatId) === req.params.id && tr.proofReceived);
     if (!t && !pendingDeliv && !pendingConf) return res.status(404).json({ error: 'No encontrado' });
