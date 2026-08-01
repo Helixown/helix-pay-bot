@@ -580,7 +580,15 @@ function tiendaPanel() {
     if (!ids.length) return { text: '🛒 No hay productos disponibles por el momento.', keyboard: [[{ text: '⬅️ Menú', callback_data: 'customer_home' }]] };
     const buttons = ids.map(id => ([{ text: `${catalog.items[id].name} — $${catalog.items[id].price.toFixed(2)}`, callback_data: `buy_${id}` }]));
     buttons.push([{ text: '⬅️ Menú', callback_data: 'customer_home' }]);
-    return { text: '🛒 <b>JH STORE</b>\nElige un producto:', keyboard: buttons };
+    const garantiaText =
+`⚠️ <b>Garantía: 3 horas</b>
+━━━━━━━━━━━━━━
+⏳ Las cuentas tienen una duración aleatoria: pueden durar minutos, horas o incluso días
+✅ Solo se garantizan las primeras <b>3 horas</b> desde la entrega
+📋 Sigue las recomendaciones que se te dan al recibir la cuenta
+
+— Team JH`;
+    return { text: `🛒 <b>JH STORE</b>\n━━━━━━━━━━━━━━\n${garantiaText}\n\nElige un producto:`, keyboard: buttons };
 }
 
 function sendTienda(chatId) {
