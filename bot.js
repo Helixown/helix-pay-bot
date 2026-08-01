@@ -587,7 +587,7 @@ function tiendaPanel() {
 ✅ Solo se garantizan las primeras <b>3 horas</b> desde la entrega
 📋 Sigue las recomendaciones que se te dan al recibir la cuenta
 
-— Team JH`;
+Gracias por tu confianza — JH STORE`;
     return { text: `🛒 <b>JH STORE</b>\n━━━━━━━━━━━━━━\n${garantiaText}\n\nElige un producto:`, keyboard: buttons };
 }
 
